@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPPS Pricer</title>
+<style>
+:root{
+  --bg:#f4f5f7; --panel:#ffffff; --ink:#1b1f24; --muted:#5d6672; --line:#d9dde3;
+  --accent:#1f5fbf; --accent-ink:#ffffff; --ok:#1d7a46; --ok-bg:#e4f4ea; --warn:#9a5b00; --warn-bg:#fff3dc; --err:#b42318; --err-bg:#fde8e6;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  --bg:#141619; --panel:#1d2126; --ink:#e8eaed; --muted:#9aa3ad; --line:#333a42;
+  --accent:#6ea2f0; --accent-ink:#0d1420; --ok:#5fd08a; --ok-bg:#15311f; --warn:#f0b357; --warn-bg:#3a2a0e; --err:#ff7b70; --err-bg:#3d1a17;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+header h1{font-size:17px;margin:0;font-weight:650}
+header .meta{color:var(--muted);font-size:12px}
+header .spacer{flex:1}
+.tabs{display:flex;gap:4px}
+.tabs button{background:none;border:1px solid var(--line);color:var(--ink);padding:5px 10px;border-radius:6px;cursor:pointer}
+.tabs button.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(360px,520px);gap:20px;padding:20px;max-width:1500px;margin:0 auto}
+main.single{grid-template-columns:1fr}
+main>div{min-width:0}
+@media (max-width:980px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:16px}
+.panel h2{font-size:14px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.panel p.meta{color:var(--muted);margin:0 0 10px;font-size:13px}
+details.group{border-top:1px solid var(--line);padding:8px 0}
+details.group summary{cursor:pointer;font-weight:600;padding:4px 0;list-style:none;display:flex;align-items:center;gap:8px}
+details.group summary::before{content:"▸";color:var(--muted);font-size:12px}
+details.group[open] summary::before{content:"▾"}
+details.group summary .count{color:var(--muted);font-weight:400;font-size:12px}
+details.adv>summary{cursor:pointer;color:var(--muted);font-size:13px;padding:6px 0;list-style:none}
+details.adv>summary::before{content:"▸ ";font-size:12px} details.adv[open]>summary::before{content:"▾ "}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 14px;padding:8px 0 4px}
+.grid.quick{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+.field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.field label{font-size:12px;color:var(--muted);display:flex;justify-content:space-between;gap:6px}
+.field label .req{color:var(--err)}
+.field label code{font-family:var(--mono);font-size:10px;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.field input,.field select,textarea,select.ghost{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;width:100%}
+.field input:invalid{border-color:var(--err)}
+.field .hint{font-size:11px;color:var(--muted);min-height:1em}
+.field .hint.ok{color:var(--ok)} .field .hint.bad{color:var(--err)}
+textarea{font-family:var(--mono);font-size:12px;min-height:320px;resize:vertical}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button.primary{background:var(--accent);color:var(--accent-ink);border:0;border-radius:6px;padding:9px 18px;font:inherit;font-weight:600;cursor:pointer}
+button.ghost{background:none;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:7px 12px;font:inherit;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+select.ghost{width:auto;padding:7px 8px}
+.sticky{position:sticky;top:76px}
+.total{font-size:34px;font-weight:700;letter-spacing:-.01em;margin:4px 0}
+.badge{display:inline-block;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:600}
+.badge.ok{background:var(--ok-bg);color:var(--ok)} .badge.warn{background:var(--warn-bg);color:var(--warn)} .badge.err{background:var(--err-bg);color:var(--err)}
+.explain{color:var(--muted);margin:6px 0 0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+td.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+tr.sub td{color:var(--muted)}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;font-size:12px;font-family:var(--mono);max-height:420px;margin:0}
+.violations li{color:var(--err);font-family:var(--mono);font-size:12px}
+.empty{color:var(--muted);padding:30px 0;text-align:center}
+.hidden{display:none !important}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:10}
+.toast.show{opacity:1}
+.drop{border:2px dashed var(--line);border-radius:8px;padding:18px;text-align:center;color:var(--muted);cursor:pointer}
+.drop.over{border-color:var(--accent);color:var(--accent)}
+.batch-table{overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:6px}
+.batch-table table{font-size:12px} .batch-table th{position:sticky;top:0;background:var(--panel);white-space:nowrap}
+.batch-table td{white-space:nowrap} .rc-ok{color:var(--ok);font-weight:600} .rc-err{color:var(--err);font-weight:600}
+.progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:8px 0}
+.progress div{height:100%;background:var(--accent);width:0;transition:width .15s}
+.hospital-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.hospital-bar select{min-width:260px}
+.pill{font-size:12px;color:var(--muted)}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>IPPS Pricer</h1>
+  <span class="meta" id="info">connecting…</span>
+  <span class="spacer"></span>
+  <div class="tabs">
+    <button class="active" data-tab="form">Price a claim</button>
+    <button data-tab="batch">Batch</button>
+    <button data-tab="hospitals">Hospitals</button>
+    <button data-tab="json">Raw JSON</button>
+  </div>
+</header>
+
+<main>
+  <div>
+    <!-- ================= PRICE A CLAIM ================= -->
+    <section id="tab-form">
+      <div class="panel">
+        <h2>Quick price</h2>
+        <div class="hospital-bar">
+          <span class="pill">Hospital</span>
+          <select class="ghost" id="hospital"></select>
+          <button class="ghost" id="edit-hospital">Edit</button>
+          <span class="pill" id="hospital-hint"></span>
+        </div>
+        <div class="grid quick" id="quick-fields"></div>
+        <div class="row" style="margin-top:6px">
+          <button class="primary" id="price">Price claim</button>
+          <button class="ghost" id="reset">Reset to sample</button>
+          <span class="meta" id="status" style="color:var(--muted)"></span>
+        </div>
+      </div>
+      <details class="adv panel" id="claim-advanced">
+        <summary>Advanced claim details (codes, review code, lifetime reserve days…)</summary>
+        <div id="claim-fields"></div>
+      </details>
+    </section>
+
+    <!-- ================= BATCH ================= -->
+    <section id="tab-batch" class="hidden">
+      <div class="panel">
+        <h2>Batch pricing from a spreadsheet</h2>
+        <p class="meta">One claim per row, seven columns: <b>label, ccn, drg, discharge date, charges, los, covered days</b>.
+          Hospitals are matched by CCN to the saved profiles on the Hospitals tab; a CCN with no profile uses the hospital selected on the Price a claim tab.
+          Any extra pricer field can be added as its own column (for example <code>diagnosisCodes</code> or <code>provider.bedSize</code>).</p>
+        <div class="row" style="margin-bottom:10px">
+          <button class="ghost" id="tpl-xlsx">Download template (.xlsx)</button>
+          <button class="ghost" id="tpl-csv">Download template (.csv)</button>
+          <button class="ghost" id="tpl-full">Full template (every field)</button>
+          <label class="meta" style="color:var(--muted)"><input type="checkbox" id="batch-stop" style="vertical-align:middle"> stop on first HTTP error</label>
+        </div>
+        <div class="drop" id="drop">Drop a .xlsx or .csv here, or click to choose a file<input type="file" id="file" accept=".xlsx,.xls,.csv,.tsv,.txt" class="hidden"></div>
+        <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted)">…or paste rows</summary>
+          <textarea id="paste" style="min-height:120px;margin-top:6px" placeholder="label,ccn,drg,discharge date,charges,los,covered days&#10;knee,010001,470,2026-11-15,85000,3,3"></textarea>
+          <button class="ghost" id="paste-load" style="margin-top:6px">Load pasted rows</button>
+        </details>
+        <div class="row" style="margin-top:12px">
+          <button class="primary" id="batch-run" disabled>Price 0 rows</button>
+          <button class="ghost" id="batch-xlsx" disabled>Download results (.xlsx)</button>
+          <button class="ghost" id="batch-csv" disabled>Download results (.csv)</button>
+          <span class="meta" id="batch-status" style="color:var(--muted)"></span>
+        </div>
+        <div class="progress hidden" id="batch-progress"><div></div></div>
+        <div class="batch-table hidden" id="batch-table"></div>
+      </div>
+    </section>
+
+    <!-- ================= HOSPITALS ================= -->
+    <section id="tab-hospitals" class="hidden">
+      <div class="panel">
+        <h2>Hospital profiles</h2>
+        <p class="meta">Enter each hospital's Provider Specific File values once. Profiles are saved to <code>profiles.json</code> next to the app and matched by CCN.
+          Only the <b>Essentials</b> group normally needs filling in; everything else defaults to the values a standard hospital has.</p>
+        <div class="hospital-bar">
+          <select class="ghost" id="profile-select"></select>
+          <button class="ghost" id="profile-new">New</button>
+          <button class="primary" id="profile-save">Save profile</button>
+          <button class="ghost" id="profile-delete">Delete</button>
+          <span class="pill" id="profile-status"></span>
+        </div>
+        <div class="grid" style="padding-top:0">
+          <div class="field" style="grid-column:1/-1;max-width:420px"><label for="profile-name">Display name</label><input id="profile-name" placeholder="e.g. Decatur Morgan Hospital"></div>
+        </div>
+        <div id="provider-fields"></div>
+      </div>
+    </section>
+
+    <!-- ================= RAW JSON ================= -->
+    <section id="tab-json" class="hidden">
+      <div class="panel">
+        <h2>Request JSON</h2>
+        <p class="meta">The exact request that will be sent to the pricer, with defaults filled in. Edit or paste, then “Price JSON”; “Apply to form” copies values back.</p>
+        <textarea id="json-editor" spellcheck="false"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="primary" id="price-json">Price JSON</button>
+          <button class="ghost" id="apply-json">Apply to form</button>
+          <button class="ghost" id="from-form">Refresh from form</button>
+          <button class="ghost" id="copy-json">Copy</button>
+          <button class="ghost" id="download-json">Download</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <aside class="sticky">
+    <div class="panel" id="result">
+      <h2>Result</h2>
+      <div class="empty">Pick a hospital, enter the claim and press <b>Price claim</b>.</div>
+    </div>
+  </aside>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================================
+// Field definitions, from the pricer's OpenAPI contract.
+//   n=json name, l=label, t=type, r=required, p=pattern, h=hint, d=default used when blank, q=quick card
+// ============================================================================
+const CLAIM = [
+ {g:"Claim", f:[
+  {n:"providerCcn",l:"Provider CCN",t:"text",r:1,p:"[A-Z\\d]{6,13}",h:"set by hospital choice"},
+  {n:"diagnosisRelatedGroup",l:"DRG",t:"text",r:1,p:"(?!000)\\d{3}",lookup:"drg",q:1},
+  {n:"dischargeDate",l:"Discharge date",t:"date",r:1,q:1},
+  {n:"coveredCharges",l:"Covered charges ($)",t:"number",r:1,step:"0.01",min:0,max:999999999.99,q:1},
+  {n:"lengthOfStay",l:"Length of stay",t:"number",r:1,step:1,min:0,max:999,q:1},
+  {n:"coveredDays",l:"Covered days",t:"number",r:1,step:1,min:0,max:999,q:1,h:"blank = same as LOS"},
+  {n:"lifetimeReserveDays",l:"Lifetime reserve days",t:"number",r:1,step:1,min:0,max:99,d:0},
+  {n:"reviewCode",l:"Review code",t:"select",r:1,o:["00","03","06","07","09","10","11"],d:"00",h:"00 = no review"},
+ ]},
+ {g:"Codes (comma-separated)", f:[
+  {n:"diagnosisCodes",l:"Diagnosis codes",t:"list",h:"ICD-10-CM, principal first, max 25"},
+  {n:"procedureCodes",l:"Procedure codes",t:"list",h:"ICD-10-PCS, max 25"},
+  {n:"conditionCodes",l:"Condition codes",t:"list"},
+  {n:"demoCodes",l:"Demo codes",t:"list",h:"61 = BPCI model 1"},
+  {n:"nationalDrugCodes",l:"National drug codes",t:"list"},
+ ]},
+ {g:"Other", f:[
+  {n:"diagnosisRelatedGroupSeverity",l:"DRG severity",t:"text",p:"[A-Z\\d]"},
+  {n:"patientDateOfBirth",l:"Patient date of birth",t:"date"},
+  {n:"midnightAdjustmentGeolocation",l:"Midnight adjustment geolocation",t:"text",p:"\\d{4}|\\d{2}"},
+ ]},
+];
+const PROVIDER = [
+ {g:"Essentials", open:1, f:[
+  {n:"providerCcn",l:"Provider CCN",t:"text",r:1,p:"[A-Z\\d]{6,13}"},
+  {n:"effectiveDate",l:"PSF effective date",t:"date",r:1,h:"usually Oct 1 of the fiscal year"},
+  {n:"fiscalYearBeginDate",l:"Fiscal year begin",t:"date",r:1,h:"blank = effective date",dFrom:"effectiveDate"},
+  {n:"stateCode",l:"State code",t:"text",p:"\\d{2}",h:"blank = first 2 digits of county"},
+  {n:"countyCode",l:"County code (SSA)",t:"text",r:1,p:"\\d{5}"},
+  {n:"cbsaActualGeographicLocation",l:"CBSA",t:"text",p:"\\d{5}|\\d{2}",lookup:"cbsa",h:"where the hospital is"},
+  {n:"cbsaWageIndexLocation",l:"CBSA for wage index",t:"text",p:"\\d{5}|\\d{2}",lookup:"cbsa",h:"blank = same as CBSA",dFrom:"cbsaActualGeographicLocation"},
+  {n:"bedSize",l:"Beds",t:"number",r:1,step:1,min:0,max:99999},
+  {n:"operatingCostToChargeRatio",l:"Operating cost-to-charge",t:"number",r:1,step:"0.001",min:0,max:9.999},
+  {n:"capitalCostToChargeRatio",l:"Capital cost-to-charge",t:"number",r:1,step:"0.0001",min:0,max:9.9999},
+  {n:"medicaidRatio",l:"Medicaid ratio (DSH)",t:"number",r:1,step:"0.0001",min:0,max:0.9999,d:0},
+  {n:"supplementalSecurityIncomeRatio",l:"SSI ratio (DSH)",t:"number",r:1,step:"0.0001",min:0,max:0.9999,d:0},
+  {n:"uncompensatedCareAmount",l:"Uncompensated care ($/discharge)",t:"number",r:1,step:"0.01",min:0,d:0},
+  {n:"internsToBedsRatio",l:"Interns-to-beds (IME)",t:"number",r:1,step:"0.0001",min:0,max:9.9999,d:0},
+  {n:"capitalIndirectMedicalEducationRatio",l:"Capital IME ratio",t:"number",r:1,step:"0.0001",min:0,max:9.9999,d:0},
+  {n:"vbpAdjustment",l:"VBP factor",t:"number",r:1,step:"0.00000000001",min:0,max:9.99999999999,d:1,h:"1 = neutral"},
+  {n:"hrrAdjustment",l:"HRRP factor",t:"number",r:1,step:"0.0001",min:0,max:9.9999,d:1,h:"1 = no readmission penalty"},
+  {n:"passThroughTotalAmount",l:"Pass-through total ($/day)",t:"number",r:1,step:"0.01",min:0,d:0},
+ ]},
+ {g:"Quality program flags", f:[
+  {n:"hrrParticipantIndicator",l:"HRRP participant",t:"select",o:["","0","1"],d:"1",h:"blank = 1 (factor applies)"},
+  {n:"vbpParticipantIndicator",l:"VBP participant",t:"select",o:["","N","Y"],d:"Y",h:"blank = Y (factor applies)"},
+  {n:"hospitalQualityIndicator",l:"Hospital quality indicator",t:"select",o:["","0","1"],d:"1"},
+  {n:"hacReductionParticipantIndicator",l:"HAC reduction participant",t:"select",o:["","N","Y"],d:"N"},
+  {n:"ehrReductionIndicator",l:"EHR reduction",t:"select",o:["","Y"],d:"Y",h:"blank = Y (pricer requires Y or empty)"},
+  {n:"medicarePerformanceAdjustment",l:"Medicare performance adj.",t:"number",step:"0.0001",min:0,max:9.9999},
+ ]},
+ {g:"Location extras", f:[
+  {n:"cbsaStandardizedAmountLocation",l:"CBSA for standardized amount",t:"text",p:"\\d{5}|\\d{2}",lookup:"cbsa",dFrom:"cbsaActualGeographicLocation"},
+  {n:"specialWageIndex",l:"Special wage index",t:"number",step:"0.0001",min:0,max:99.9999},
+  {n:"supplementalWageIndex",l:"Supplemental wage index",t:"number",step:"0.0001",min:0,max:99.9999},
+  {n:"supplementalWageIndexIndicator",l:"Suppl. wage index indicator",t:"text",p:"[A-Z\\d]"},
+  {n:"costOfLivingAdjustment",l:"COLA",t:"number",r:1,step:"0.001",min:0,max:9.999,d:1,h:"blank = 1 (only AK/HI differ)"},
+  {n:"intermediaryNumber",l:"Intermediary (MAC) no.",t:"text",p:"\\d{5}"},
+  {n:"terminationDate",l:"Termination date",t:"date"},
+ ]},
+ {g:"Rarely used (defaults shown)", f:[
+  {n:"providerType",l:"Provider type",t:"text",p:"\\d{2}",d:"00"},
+  {n:"capitalPpsPaymentCode",l:"Capital PPS payment code",t:"select",o:["","B","C"],d:"B"},
+  {n:"waiverIndicator",l:"Waiver state",t:"select",o:["","N","Y"],d:"N"},
+  {n:"newHospital",l:"New hospital",t:"select",o:["","N","Y"],d:"N"},
+  {n:"federalPpsBlend",l:"Federal PPS blend",t:"text",p:"[A-Z\\d]"},
+  {n:"specialPaymentIndicator",l:"Special payment indicator",t:"text",p:"[A-Z\\d]"},
+  {n:"temporaryReliefIndicator",l:"Temporary relief",t:"select",o:["","N","Y"]},
+  {n:"ltchDppIndicator",l:"LTCH DPP indicator",t:"select",o:["","N","Y"]},
+  {n:"lowVolumeAdjustmentFactor",l:"Low-volume adj. factor",t:"number",r:1,step:"0.000001",min:0,max:9.999999,d:0},
+  {n:"bundleModel1Discount",l:"BPCI model 1 discount",t:"number",r:1,step:"0.001",min:0,max:9.999,d:0},
+  {n:"capitalExceptionPaymentRate",l:"Capital exception rate ($)",t:"number",r:1,step:"0.01",min:0,d:0},
+  {n:"oldCapitalHoldHarmlessRate",l:"Old capital hold-harmless ($)",t:"number",r:1,step:"0.01",min:0,d:0},
+  {n:"ppsFacilitySpecificRate",l:"Facility-specific rate ($)",t:"number",r:1,step:"0.01",min:0,d:0},
+  {n:"passThroughAmountForDirectMedicalEducation",l:"Pass-through: direct med. ed. ($)",t:"number",r:1,step:"0.01",min:0,d:0},
+  {n:"passThroughAmountForOrganAcquisition",l:"Pass-through: organ acquisition ($)",t:"number",r:1,step:"0.01",min:0,d:0},
+  {n:"passThroughAmountForCapital",l:"Pass-through: capital ($)",t:"number",step:"0.01",min:0},
+  {n:"passThroughAmountForAllogenicStemCellAcquisition",l:"Pass-through: stem cell ($)",t:"number",step:"0.01",min:0},
+  {n:"passThroughAmountForSupplyChainCosts",l:"Pass-through: supply chain ($)",t:"number",step:"0.01",min:0},
+ ]},
+];
+const ALL = {claimData: CLAIM.flatMap(g=>g.f), providerData: PROVIDER.flatMap(g=>g.f)};
+const BY_NAME = {claimData:Object.fromEntries(ALL.claimData.map(f=>[f.n,f])), providerData:Object.fromEntries(ALL.providerData.map(f=>[f.n,f]))};
+// CMS convention: return codes 00-49 are priced results (incl. outliers/transfers), 50+ are errors
+const isPaid = c => /^\d{2}$/.test(c||"") && Number(c)<50;
+
+const PAYMENT_ROWS = [
+ ["operatingFederalSpecificPortionPart","Operating federal-specific portion"],
+ ["operatingHospitalSpecificPortionPart","Operating hospital-specific portion"],
+ ["operatingDisproportionateShareHospitalAdjustment","Operating DSH adjustment"],
+ ["operatingIndirectMedicalEducationAdjustment","Operating IME adjustment"],
+ ["operatingOutlierPaymentPart","Operating outlier"],
+];
+const INFO_ROWS = [
+ ["finalCbsa","Final CBSA"],["finalWageIndex","Final wage index"],["averageLengthOfStay","DRG average LOS"],
+ ["regularDaysUsed","Regular days used"],["lifetimeReserveDaysUsed","Lifetime reserve days used"],["outlierDays","Outlier days"],["daysCutoff","Days cutoff"],
+];
+
+// ---------- helpers ----------
+const $ = s=>document.querySelector(s);
+const el = (tag, attrs={}, ...kids)=>{const e=document.createElement(tag); for(const [k,v] of Object.entries(attrs)){ if(k==="class") e.className=v; else if(k.startsWith("on")) e.addEventListener(k.slice(2),v); else if(v!==undefined&&v!==null) e.setAttribute(k,v);} for(const k of kids) e.append(k); return e;};
+const money = v => v==null ? "—" : Number(v).toLocaleString("en-US",{style:"currency",currency:"USD"});
+const fiscalYear = dateStr => { if(!dateStr) return null; const d=new Date(dateStr+"T00:00:00"); return d.getMonth()>=9 ? d.getFullYear()+1 : d.getFullYear(); };
+let toastT; const toast = m => { const t=$("#toast"); t.textContent=m; t.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("show"),2000); };
+const lsGet=(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch{return d;}};
+const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
+const dig=(o,p)=>p.split(".").reduce((a,k)=>a==null?undefined:a[k],o);
+
+// ---------- form rendering ----------
+function makeInput(section, f){
+  const id=`${section}.${f.n}`; let input;
+  if(f.t==="select"){ input=el("select",{id}); for(const o of f.o) input.append(el("option",{value:o},o===""?(f.d!==undefined?`— (${f.d})`:"—"):o)); }
+  else input=el("input",{id,type:f.t==="list"?"text":f.t,step:f.step,min:f.min,max:f.max,pattern:f.p,placeholder:f.t==="list"?"A, B, C":(f.d!==undefined?String(f.d):"")});
+  input.dataset.section=section; input.dataset.name=f.n; input.dataset.type=f.t;
+  if(f.r && f.d===undefined && !f.dFrom) input.required=true;
+  const hint=el("div",{class:"hint"},f.h||"");
+  if(f.lookup){ input.addEventListener("change",()=>lookup(f.lookup,input,hint)); }
+  return el("div",{class:"field"},
+    el("label",{for:id},el("span",{},f.l,input.required?el("span",{class:"req"}," *"):""),el("code",{title:f.n},f.n)),
+    input, hint);
+}
+function renderGroups(container, groups, section, skip=()=>false){
+  groups.forEach((g,i)=>{
+    const fields=g.f.filter(f=>!skip(f)); if(!fields.length) return;
+    const d=el("details",{class:"group",open:g.open?"":null});
+    d.append(el("summary",{},g.g,el("span",{class:"count"},`${fields.length} fields`)));
+    const grid=el("div",{class:"grid"}); for(const f of fields) grid.append(makeInput(section,f));
+    d.append(grid); container.append(d);
+  });
+}
+for(const f of ALL.claimData.filter(f=>f.q)) $("#quick-fields").append(makeInput("claimData",f));
+renderGroups($("#claim-fields"), CLAIM, "claimData", f=>f.q);
+renderGroups($("#provider-fields"), PROVIDER, "providerData");
+
+// Read inputs; blanks get their defaults so the pricer always receives a complete record.
+function readSection(section){
+  const out={};
+  for(const f of ALL[section]){
+    const inp=document.getElementById(`${section}.${f.n}`); let v=inp?inp.value.trim():"";
+    if(v===""){ if(f.d!==undefined) v=f.d; else continue; }
+    if(f.t==="number") v=Number(v); else if(f.t==="list") v=String(v).split(/[,;|\s]+/).filter(Boolean);
+    out[f.n]=v;
+  }
+  return applyDerived(section,out);
+}
+function applyDerived(section,out){
+  for(const f of ALL[section]) if(f.dFrom && out[f.n]===undefined && out[f.dFrom]!==undefined) out[f.n]=out[f.dFrom];
+  if(section==="claimData" && out.coveredDays===undefined && out.lengthOfStay!==undefined) out.coveredDays=out.lengthOfStay;
+  if(section==="providerData" && out.stateCode===undefined && out.countyCode) out.stateCode=String(out.countyCode).slice(0,2);
+  return out;
+}
+function readForm(){ return {claimData:readSection("claimData"), providerData:readSection("providerData")}; }
+function fillSection(section, data, {clear=true}={}){
+  if(clear) for(const inp of document.querySelectorAll(`[data-section="${section}"]`)) inp.value="";
+  for(const [k,v] of Object.entries(data||{})){ const inp=document.getElementById(`${section}.${k}`); if(inp) inp.value=Array.isArray(v)?v.join(", "):v; }
+  for(const inp of document.querySelectorAll(`[data-section="${section}"]`)) if(inp.value && (inp.dataset.name.startsWith("cbsa")||inp.dataset.name==="diagnosisRelatedGroup")) inp.dispatchEvent(new Event("change"));
+}
+function fillForm(data){ fillSection("claimData",data?.claimData); fillSection("providerData",data?.providerData); }
+
+// ---------- lookups ----------
+async function lookup(kind, input, hint){
+  const v=input.value.trim(); if(!v){hint.textContent="";hint.className="hint";return;}
+  const fy=fiscalYear(document.getElementById("claimData.dischargeDate").value)||new Date().getFullYear()+1;
+  try{
+    if(kind==="drg"){
+      const r=await fetch(`/api/v1/drg-entries/${fy}/${v}`,{headers:{Accept:"application/json"}}); if(!r.ok) throw 0;
+      const e=(await r.json()).tableEntries?.[0]; if(!e) throw 0;
+      hint.textContent=`${e.description} · wt ${e.weight} · GMLOS ${e.geometricMeanLengthOfStay}${e.postAcuteCare==="Y"?" · post-acute":""} (FY${fy})`; hint.className="hint ok";
+    } else {
+      const r=await fetch(`/api/v1/cbsa-wage-indexes/${fy}/${v}`,{headers:{Accept:"application/json"}}); if(!r.ok) throw 0;
+      const e=(await r.json()).wageIndexData?.[0]; if(!e) throw 0;
+      hint.textContent=`${e.name} · wage index ${e.geographicWageIndex} (FY${fy})`; hint.className="hint ok";
+    }
+  }catch{ hint.textContent=`not found in FY${fy} table`; hint.className="hint bad"; }
+}
+
+// ---------- hospitals (profiles, saved on the server in profiles.json) ----------
+let PROFILES={};           // ccn -> {name, ...providerData}
+let currentCcn=null;       // profile loaded in the Hospitals form / selected on quick card
+const stripName = p => { const {name, ...rest}=p||{}; return rest; };
+async function loadProfiles(){ try{ PROFILES=await (await fetch("/profiles")).json(); }catch{ PROFILES={}; } refreshHospitalSelects(); }
+async function saveProfiles(){ const r=await fetch("/profiles",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(PROFILES)}); if(!r.ok) throw new Error("save failed"); }
+function profileLabel(ccn){ const p=PROFILES[ccn]; return p?.name?`${p.name} (${ccn})`:ccn; }
+function refreshHospitalSelects(){
+  for(const sel of [$("#hospital"),$("#profile-select")]){
+    const keep=sel.value; sel.innerHTML="";
+    sel.append(el("option",{value:""},sel.id==="hospital"?"— choose a hospital —":"— new profile —"));
+    for(const ccn of Object.keys(PROFILES).sort()) sel.append(el("option",{value:ccn},profileLabel(ccn)));
+    sel.value=Object.keys(PROFILES).includes(keep)?keep:(currentCcn&&PROFILES[currentCcn]?currentCcn:"");
+  }
+  $("#hospital-hint").textContent=Object.keys(PROFILES).length?"":"No hospitals saved yet. Open the Hospitals tab to add one.";
+}
+function selectHospital(ccn){
+  currentCcn=ccn||null;
+  fillSection("providerData", stripName(PROFILES[ccn])); $("#profile-name").value=PROFILES[ccn]?.name||"";
+  if(ccn) document.getElementById("claimData.providerCcn").value=ccn;
+  $("#hospital").value=ccn||""; $("#profile-select").value=ccn||"";
+  $("#profile-status").textContent=ccn?`editing ${profileLabel(ccn)}`:"new profile";
+}
+$("#hospital").addEventListener("change",e=>selectHospital(e.target.value));
+$("#profile-select").addEventListener("change",e=>selectHospital(e.target.value));
+$("#edit-hospital").addEventListener("click",()=>showTab("hospitals"));
+$("#profile-new").addEventListener("click",()=>{ selectHospital(""); fillSection("providerData",{}); $("#profile-status").textContent="new profile: fill in Essentials, then Save"; document.getElementById("providerData.providerCcn").focus(); });
+$("#profile-save").addEventListener("click",async()=>{
+  const bad=[...document.querySelectorAll('[data-section="providerData"]')].filter(i=>!i.checkValidity());
+  if(bad.length){ bad[0].closest("details").open=true; bad[0].reportValidity(); return; }
+  const data=readSection("providerData"); const ccn=data.providerCcn; if(!ccn) return toast("Provider CCN is required");
+  // store only what was actually typed, so defaults stay defaults
+  const typed={}; for(const inp of document.querySelectorAll('[data-section="providerData"]')) if(inp.value.trim()!=="") typed[inp.dataset.name]=BY_NAME.providerData[inp.dataset.name].t==="number"?Number(inp.value):inp.value.trim();
+  if(currentCcn && currentCcn!==ccn) delete PROFILES[currentCcn];
+  PROFILES[ccn]={name:$("#profile-name").value.trim()||"", ...typed};
+  try{ await saveProfiles(); refreshHospitalSelects(); selectHospital(ccn); toast(`Saved ${profileLabel(ccn)}`); }catch(e){ toast("Could not save: "+e.message); }
+});
+$("#profile-delete").addEventListener("click",async()=>{
+  const ccn=$("#profile-select").value; if(!ccn) return toast("Select a saved profile first");
+  if(!confirm(`Delete ${profileLabel(ccn)}?`)) return;
+  delete PROFILES[ccn]; await saveProfiles(); refreshHospitalSelects(); selectHospital(""); toast("Deleted");
+});
+
+// ---------- pricing ----------
+async function price(body){
+  $("#price").disabled=$("#price-json").disabled=true; $("#status").textContent="pricing…";
+  try{
+    const r=await fetch("/api/v2/price-claim",{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body});
+    const text=await r.text(); let data; try{data=JSON.parse(text);}catch{data={raw:text};}
+    renderResult(r.status,data);
+  }catch(e){ renderResult(0,{error:String(e)}); }
+  finally{ $("#price").disabled=$("#price-json").disabled=false; $("#status").textContent=""; }
+}
+function renderResult(status, data){
+  const box=$("#result"); box.innerHTML=""; box.append(el("h2",{},"Result"));
+  if(status!==200){
+    box.append(el("span",{class:"badge err"},`HTTP ${status||"error"}`));
+    if(data.violations){ const ul=el("ul",{class:"violations"}); for(const v of data.violations) ul.append(el("li",{},`${v.field.replace(/^priceClaim\.arg0\./,"")}: ${v.message}`)); box.append(el("p",{class:"explain"},"The pricer rejected the request:"),ul); }
+    else box.append(el("pre",{},JSON.stringify(data,null,2)));
+    return;
+  }
+  const rc=data.returnCodeData||{}, pd=data.paymentData||{}, cls=isPaid(rc.code)?"ok":"err";
+  box.append(el("div",{class:"total"},money(pd.totalPayment)));
+  box.append(el("span",{class:`badge ${cls}`},`RC ${rc.code} · ${rc.description||""}`), el("span",{class:"meta",style:"margin-left:8px;color:var(--muted)"},`calc ${data.calculationVersion}`));
+  if(rc.explanation) box.append(el("p",{class:"explain"},rc.explanation));
+  const t=el("table",{});
+  for(const [k,l] of PAYMENT_ROWS) t.append(el("tr",{},el("td",{},l),el("td",{class:"num"},money(pd[k]))));
+  const cap=dig(data,"additionalCalculationVariables.additionalCapitalVariables.capitalTotalPayment");
+  if(cap!=null) t.append(el("tr",{},el("td",{},"Capital total"),el("td",{class:"num"},money(cap))));
+  const api=dig(data,"additionalCalculationVariables.additionalPaymentInformation")||{};
+  for(const [k,l] of [["uncompensatedCarePayment","Uncompensated care"],["newTechnologyAddOnPayment","New technology add-on"],["lowVolumePayment","Low-volume payment"],["valueBasedPurchasingAdjustmentPayment","VBP adjustment"],["hospitalReadmissionReductionAdjustmentPayment","HRRP adjustment"],["hospitalAcquiredConditionPayment","HAC adjustment"],["electronicHealthRecordAdjustmentPayment","EHR adjustment"],["bundledAdjustmentPayment","Bundled adjustment"]]){
+    const v=api[k] ?? data.additionalCalculationVariables?.[k]; if(v!=null) t.append(el("tr",{class:"sub"},el("td",{},l),el("td",{class:"num"},money(v))));
+  }
+  for(const [k,l] of INFO_ROWS) if(pd[k]!=null) t.append(el("tr",{class:"sub"},el("td",{},l),el("td",{class:"num"},String(pd[k]))));
+  const acv=data.additionalCalculationVariables||{};
+  if(acv.drgRelativeWeight!=null) t.append(el("tr",{class:"sub"},el("td",{},"DRG relative weight"),el("td",{class:"num"},String(acv.drgRelativeWeight))));
+  if(acv.costThreshold!=null) t.append(el("tr",{class:"sub"},el("td",{},"Outlier cost threshold"),el("td",{class:"num"},money(acv.costThreshold))));
+  box.append(el("div",{style:"margin-top:12px"},t));
+  box.append(el("details",{style:"margin-top:12px"},el("summary",{style:"cursor:pointer;color:var(--muted)"},"Full response JSON"),el("pre",{},JSON.stringify(data,null,2))));
+  box.append(el("div",{class:"row",style:"margin-top:10px"},
+    el("button",{class:"ghost",onclick:()=>{navigator.clipboard.writeText(JSON.stringify(data,null,2));toast("Response copied");}},"Copy response"),
+    el("button",{class:"ghost",onclick:()=>downloadBlob("ipps-response.json",new Blob([JSON.stringify(data,null,2)],{type:"application/json"}))},"Download response")));
+}
+function downloadBlob(name, blob){ const a=el("a",{href:URL.createObjectURL(blob),download:name}); a.click(); }
+
+// ---------- batch ----------
+// Header aliases: friendly names -> pricer fields. Bare pricer field names and claim./provider. prefixes also work.
+const ALIAS = {label:"label",name:"label",id:"label",claimid:"label",patient:"label",
+  ccn:"claim.providerCcn",providerccn:"claim.providerCcn",provider:"claim.providerCcn",hospital:"claim.providerCcn",
+  drg:"claim.diagnosisRelatedGroup",msdrg:"claim.diagnosisRelatedGroup",
+  dischargedate:"claim.dischargeDate",discharge:"claim.dischargeDate",dos:"claim.dischargeDate",
+  charges:"claim.coveredCharges",coveredcharges:"claim.coveredCharges",totalcharges:"claim.coveredCharges",
+  los:"claim.lengthOfStay",lengthofstay:"claim.lengthOfStay",
+  days:"claim.coveredDays",covereddays:"claim.coveredDays",
+  ltr:"claim.lifetimeReserveDays",lifetimereservedays:"claim.lifetimeReserveDays",
+  reviewcode:"claim.reviewCode",dx:"claim.diagnosisCodes",diagnosiscodes:"claim.diagnosisCodes",px:"claim.procedureCodes",procedurecodes:"claim.procedureCodes"};
+function resolveHeader(h){
+  const raw=h.trim(); const key=raw.toLowerCase().replace(/[^a-z0-9.]/g,"");
+  if(ALIAS[key]) return ALIAS[key];
+  if(key.startsWith("claim.")||key.startsWith("provider.")){ const [sec,name]=raw.split("."); const s=sec.trim().toLowerCase()==="claim"?"claimData":"providerData"; const f=ALL[s].find(f=>f.n.toLowerCase()===name.trim().toLowerCase()); return f?`${sec.trim().toLowerCase()}.${f.n}`:null; }
+  const fc=ALL.claimData.find(f=>f.n.toLowerCase()===key); if(fc) return "claim."+fc.n;
+  const fp=ALL.providerData.find(f=>f.n.toLowerCase()===key); if(fp) return "provider."+fp.n;
+  return null;
+}
+const PAD = {"claim.providerCcn":6,"provider.providerCcn":6,"claim.diagnosisRelatedGroup":3,"claim.reviewCode":2,"provider.countyCode":5,"provider.stateCode":2,"provider.intermediaryNumber":5,"provider.providerType":2};
+const OUT_COLS = [["rc","returnCodeData.code"],["rcDescription","returnCodeData.description"],["totalPayment","paymentData.totalPayment"],
+  ["operatingFederal","paymentData.operatingFederalSpecificPortionPart"],["operatingHospitalSpecific","paymentData.operatingHospitalSpecificPortionPart"],
+  ["operatingDSH","paymentData.operatingDisproportionateShareHospitalAdjustment"],["operatingIME","paymentData.operatingIndirectMedicalEducationAdjustment"],
+  ["operatingOutlier","paymentData.operatingOutlierPaymentPart"],["capitalTotal","additionalCalculationVariables.additionalCapitalVariables.capitalTotalPayment"],
+  ["uncompensatedCare","additionalCalculationVariables.additionalPaymentInformation.uncompensatedCarePayment"],
+  ["newTechAddOn","additionalCalculationVariables.newTechnologyAddOnPayment"],["lowVolume","additionalCalculationVariables.lowVolumePayment"],
+  ["finalWageIndex","paymentData.finalWageIndex"],["drgWeight","additionalCalculationVariables.drgRelativeWeight"],["regularDaysUsed","paymentData.regularDaysUsed"],
+  ["outlierDays","paymentData.outlierDays"],["hospital","_hospital"],["calcVersion","calculationVersion"],["httpStatus","_status"],["error","_error"]];
+let batchRows=[], batchHeaders=[], batchMap={}, batchResults=[];
+
+function fmtDate(v){ if(v instanceof Date) return isNaN(v)?"":v.toISOString().slice(0,10);
+  if(typeof v==="number" && v>20000 && v<80000){ return new Date(Math.round((v-25569)*86400000)).toISOString().slice(0,10); }
+  const m=String(v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if(m) return `${m[3]}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`;
+  return String(v).trim(); }
+function cellValue(col, v){
+  const [sec,name]=col.split("."); const f=BY_NAME[sec==="claim"?"claimData":"providerData"][name]; if(!f) return undefined;
+  if(v==null || String(v).trim()==="") return undefined;
+  if(f.t==="number") return Number(String(v).replace(/[$,]/g,""));
+  if(f.t==="date") return fmtDate(v);
+  if(f.t==="list") return String(v).split(/[;|,\s]+/).filter(Boolean);
+  let s=String(v).trim(); if(PAD[col] && /^\d+$/.test(s)) s=s.padStart(PAD[col],"0");
+  if(col.startsWith("provider.cbsa") && /^\d+$/.test(s)) s=s.padStart(Number(s)<100?2:5,"0");
+  return s;
+}
+// Build the request for one row: profile (by CCN) or current hospital, then row overrides, then defaults.
+function rowToRequest(row){
+  const claim={}, prov={};
+  for(const [h,raw] of Object.entries(row)){ const col=batchMap[h]; if(!col||col==="label") continue; const v=cellValue(col,raw); if(v===undefined) continue; (col.startsWith("claim.")?claim:prov)[col.split(".")[1]]=v; }
+  const ccn=claim.providerCcn || currentCcn || readSection("providerData").providerCcn;
+  const base=PROFILES[ccn] ? stripName(PROFILES[ccn]) : readSection("providerData");
+  const providerData={...base, ...prov}; providerData.providerCcn=providerData.providerCcn||ccn;
+  const claimData={...claim}; claimData.providerCcn=claimData.providerCcn||providerData.providerCcn;
+  for(const s of [["claimData",claimData],["providerData",providerData]]) for(const f of ALL[s[0]]) if(s[1][f.n]===undefined && f.d!==undefined) s[1][f.n]=f.d;
+  applyDerived("claimData",claimData); applyDerived("providerData",providerData);
+  return {req:{claimData,providerData}, hospital:PROFILES[ccn]?profileLabel(ccn):(ccn?`${ccn} (not saved; used current hospital form)`:"no hospital")};
+}
+function setRows(headers, rows, source){
+  batchRows=rows; batchHeaders=headers; batchResults=[]; batchMap={};
+  const unknown=[]; for(const h of headers){ const c=resolveHeader(h); if(c) batchMap[h]=c; else if(h.trim()) unknown.push(h); }
+  const known=Object.values(batchMap).filter(c=>c!=="label").length;
+  $("#batch-run").disabled=rows.length===0; $("#batch-run").textContent=`Price ${rows.length} row${rows.length===1?"":"s"}`;
+  $("#batch-xlsx").disabled=$("#batch-csv").disabled=true;
+  $("#batch-status").textContent=`${source}: ${rows.length} rows, ${known} pricer columns recognized${unknown.length?`, ignored: ${unknown.join(", ")}`:""}`;
+  renderBatchTable();
+}
+function parseDelimited(text){
+  const delim=text.split("\n")[0].includes("\t")?"\t":",";
+  const rows=[]; let row=[], cell="", q=false;
+  for(let i=0;i<text.length;i++){ const c=text[i];
+    if(q){ if(c==='"'){ if(text[i+1]==='"'){cell+='"';i++;} else q=false; } else cell+=c; }
+    else if(c==='"') q=true; else if(c===delim){row.push(cell);cell="";} else if(c==="\n"){row.push(cell);rows.push(row);row=[];cell="";} else if(c!=="\r") cell+=c; }
+  if(cell!==""||row.length){row.push(cell);rows.push(row);}
+  const nonEmpty=rows.filter(r=>r.some(x=>x.trim()!=="")); if(!nonEmpty.length) return {headers:[],rows:[]};
+  const headers=nonEmpty[0].map(h=>h.trim());
+  return {headers, rows: nonEmpty.slice(1).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??""])))};
+}
+async function loadFile(file){
+  if(/\.xlsx?$/i.test(file.name) && window.XLSX){
+    const wb=XLSX.read(await file.arrayBuffer(),{cellDates:true}); const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{defval:""}); const headers=rows.length?Object.keys(rows[0]):[];
+    setRows(headers, rows, file.name);
+  } else { const {headers,rows}=parseDelimited(await file.text()); setRows(headers,rows,file.name); }
+}
+$("#drop").addEventListener("click",()=>$("#file").click());
+$("#file").addEventListener("change",e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); e.target.value=""; });
+for(const ev of ["dragenter","dragover"]) $("#drop").addEventListener(ev,e=>{e.preventDefault();$("#drop").classList.add("over");});
+for(const ev of ["dragleave","drop"]) $("#drop").addEventListener(ev,e=>{e.preventDefault();$("#drop").classList.remove("over");});
+$("#drop").addEventListener("drop",e=>{ const f=e.dataTransfer.files[0]; if(f) loadFile(f); });
+$("#paste-load").addEventListener("click",()=>{ const {headers,rows}=parseDelimited($("#paste").value); setRows(headers,rows,"pasted text"); });
+
+const SHORT_HEADERS=["label","ccn","drg","discharge date","charges","los","covered days"];
+function templateRows(full){
+  const s=SAMPLE||readForm(); const c=s.claimData;
+  if(!full) return [{label:"sample knee replacement","ccn":c.providerCcn,"drg":c.diagnosisRelatedGroup,"discharge date":c.dischargeDate,"charges":c.coveredCharges,"los":c.lengthOfStay,"covered days":c.coveredDays}];
+  const row={label:"sample"};
+  for(const f of ALL.claimData){ const v=c[f.n]; row["claim."+f.n]=Array.isArray(v)?v.join(";"):(v??""); }
+  for(const f of ALL.providerData){ const v=s.providerData[f.n]; row["provider."+f.n]=(v??""); }
+  return [row];
+}
+function toCsv(rows, headers){ const esc=v=>{v=v==null?"":String(v); return /[",\n]/.test(v)?`"${v.replace(/"/g,'""')}"`:v;}; return [headers.join(","),...rows.map(r=>headers.map(h=>esc(r[h])).join(","))].join("\n"); }
+function downloadXlsx(name, rows, headers){
+  if(!window.XLSX){ toast("Spreadsheet library not loaded, using CSV"); return downloadBlob(name.replace(/\.xlsx$/,".csv"),new Blob([toCsv(rows,headers)],{type:"text/csv"})); }
+  const ws=XLSX.utils.json_to_sheet(rows,{header:headers}); ws["!cols"]=headers.map(h=>({wch:Math.max(12,h.length+2)}));
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"claims"); XLSX.writeFile(wb,name);
+}
+$("#tpl-xlsx").addEventListener("click",()=>downloadXlsx("ipps-claims-template.xlsx",templateRows(false),SHORT_HEADERS));
+$("#tpl-csv").addEventListener("click",()=>downloadBlob("ipps-claims-template.csv",new Blob([toCsv(templateRows(false),SHORT_HEADERS)],{type:"text/csv"})));
+$("#tpl-full").addEventListener("click",()=>{ const r=templateRows(true); downloadXlsx("ipps-claims-template-full.xlsx",r,Object.keys(r[0])); });
+
+$("#batch-run").addEventListener("click",async()=>{
+  const stopOnErr=$("#batch-stop").checked; batchResults=new Array(batchRows.length);
+  $("#batch-run").disabled=true; $("#batch-progress").classList.remove("hidden"); const bar=$("#batch-progress div"); let done=0, t0=Date.now(), limit=batchRows.length;
+  const worker=async(idx)=>{ while(idx<limit){
+    const i=idx; idx+=4; const {req,hospital}=rowToRequest(batchRows[i]); let res;
+    try{ const r=await fetch("/api/v2/price-claim",{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify(req)});
+         const txt=await r.text(); let j; try{j=JSON.parse(txt);}catch{j={raw:txt};} j._status=r.status; j._hospital=hospital;
+         if(r.status!==200) j._error=j.violations?j.violations.map(v=>`${v.field.replace(/^priceClaim\.arg0\./,"")} ${v.message}`).join("; "):(j.detail||j.error||txt.slice(0,200));
+         res=j; }
+    catch(e){ res={_status:0,_error:String(e),_hospital:hospital}; }
+    batchResults[i]={req,res}; done++; bar.style.width=`${100*done/batchRows.length}%`;
+    $("#batch-status").textContent=`priced ${done}/${batchRows.length}…`;
+    if(done%10===0) renderBatchTable();
+    if(stopOnErr && res._status!==200) limit=0;
+  }};
+  await Promise.all([0,1,2,3].map(worker));
+  renderBatchTable();
+  const got=batchResults.filter(Boolean), paid=got.filter(x=>isPaid(x.res?.returnCodeData?.code)).length, total=got.reduce((a,x)=>a+(x.res?.paymentData?.totalPayment||0),0);
+  $("#batch-status").textContent=`done: ${got.length} of ${batchRows.length} rows in ${((Date.now()-t0)/1000).toFixed(1)}s · ${paid} paid · ${got.length-paid} not paid · total ${money(total)}`;
+  $("#batch-run").disabled=false; $("#batch-xlsx").disabled=$("#batch-csv").disabled=false;
+});
+function resultRows(){ return batchRows.map((row,i)=>{ const out={...row}; const x=batchResults[i]; if(x) for(const [k,p] of OUT_COLS){ const v=dig(x.res,p); out["out."+k]=v==null?"":v; } return out; }); }
+function resultHeaders(){ return [...batchHeaders, ...OUT_COLS.map(([k])=>"out."+k)]; }
+$("#batch-xlsx").addEventListener("click",()=>downloadXlsx("ipps-batch-results.xlsx",resultRows(),resultHeaders()));
+$("#batch-csv").addEventListener("click",()=>downloadBlob("ipps-batch-results.csv",new Blob([toCsv(resultRows(),resultHeaders())],{type:"text/csv"})));
+function renderBatchTable(){
+  const box=$("#batch-table"); box.classList.toggle("hidden",!batchRows.length); if(!batchRows.length) return;
+  const want=["label","claim.providerCcn","claim.diagnosisRelatedGroup","claim.dischargeDate","claim.coveredCharges","claim.lengthOfStay"];
+  const show=want.map(c=>batchHeaders.find(h=>batchMap[h]===c)).filter(Boolean);
+  const t=el("table",{}); const tr=el("tr",{},el("th",{},"#")); for(const h of show) tr.append(el("th",{},h)); for(const h of ["RC","Description","Total payment","Operating","Capital","Outlier"]) tr.append(el("th",{},h)); t.append(el("thead",{},tr));
+  const tb=el("tbody",{});
+  batchRows.forEach((row,i)=>{ const x=batchResults[i]; const r=el("tr",{},el("td",{},String(i+1)));
+    for(const h of show) r.append(el("td",{},String(row[h]??"")));
+    if(!x){ r.append(el("td",{colspan:6,style:"color:var(--muted)"},"pending")); }
+    else if(x.res._status!==200){ r.append(el("td",{class:"rc-err"},`HTTP ${x.res._status}`),el("td",{colspan:5,style:"color:var(--err)"},x.res._error||"")); }
+    else { const rc=x.res.returnCodeData||{}, pd=x.res.paymentData||{};
+      r.append(el("td",{class:isPaid(rc.code)?"rc-ok":"rc-err"},rc.code||""),el("td",{title:rc.explanation||""},rc.description||""),
+        el("td",{class:"num"},money(pd.totalPayment)),el("td",{class:"num"},money((pd.operatingFederalSpecificPortionPart||0)+(pd.operatingHospitalSpecificPortionPart||0))),
+        el("td",{class:"num"},money(dig(x.res,"additionalCalculationVariables.additionalCapitalVariables.capitalTotalPayment"))),el("td",{class:"num"},money(pd.operatingOutlierPaymentPart))); }
+    r.style.cursor="pointer"; r.title=x?`Hospital: ${x.res._hospital}`:"";
+    r.addEventListener("click",()=>{ if(x){ $("#json-editor").value=JSON.stringify(x.req,null,2); renderResult(x.res._status,x.res); document.querySelector("aside").classList.remove("hidden"); toast(`Row ${i+1} shown in Result panel`); } });
+    tb.append(r); });
+  t.append(tb); box.innerHTML=""; box.append(t);
+}
+
+// ---------- tabs & wiring ----------
+function showTab(name){
+  document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("active",x.dataset.tab===name));
+  for(const t of ["form","json","batch","hospitals"]) $("#tab-"+t).classList.toggle("hidden",name!==t);
+  const wide=name==="batch"||name==="hospitals";
+  document.querySelector("aside").classList.toggle("hidden",wide); document.querySelector("main").classList.toggle("single",wide);
+  if(name==="json") $("#json-editor").value=JSON.stringify(readForm(),null,2);
+}
+document.querySelectorAll(".tabs button").forEach(b=>b.addEventListener("click",()=>showTab(b.dataset.tab)));
+let SAMPLE=null;
+$("#price").addEventListener("click",()=>{
+  const bad=[...document.querySelectorAll("[data-section]")].filter(i=>!i.checkValidity());
+  if(bad.length){ const d=bad[0].closest("details"); if(d) d.open=true; if(bad[0].dataset.section==="providerData") showTab("hospitals"); bad[0].reportValidity(); return; }
+  const req=readForm(); $("#json-editor").value=JSON.stringify(req,null,2); price(JSON.stringify(req));
+});
+$("#reset").addEventListener("click",()=>{ fillSection("claimData",SAMPLE.claimData); if(PROFILES[SAMPLE.claimData.providerCcn]) selectHospital(SAMPLE.claimData.providerCcn); else fillSection("providerData",SAMPLE.providerData); toast("Sample loaded"); });
+$("#price-json").addEventListener("click",()=>{ try{ JSON.parse($("#json-editor").value); }catch(e){ return toast("Invalid JSON: "+e.message); } price($("#json-editor").value); });
+$("#apply-json").addEventListener("click",()=>{ try{ fillForm(JSON.parse($("#json-editor").value)); toast("Applied to form"); }catch(e){ toast("Invalid JSON: "+e.message); } });
+$("#from-form").addEventListener("click",()=>{ $("#json-editor").value=JSON.stringify(readForm(),null,2); });
+$("#copy-json").addEventListener("click",()=>{ navigator.clipboard.writeText($("#json-editor").value); toast("Copied"); });
+$("#download-json").addEventListener("click",()=>downloadBlob("ipps-claim.json",new Blob([$("#json-editor").value],{type:"application/json"})));
+document.getElementById("claimData.dischargeDate").addEventListener("change",()=>{
+  document.querySelectorAll("[data-section]").forEach(i=>{ if(i.value && (i.dataset.name.startsWith("cbsa")||i.dataset.name==="diagnosisRelatedGroup")) i.dispatchEvent(new Event("change")); });
+});
+
+(async()=>{
+  try{ const i=await (await fetch("/api/v1/info")).json(); const yrs=await (await fetch("/api/v1/supported-years")).json();
+       $("#info").textContent=`pricer ${i.apiVersion} · FY ${yrs[0]}–${yrs[yrs.length-1]} · calc ${Object.values(i.supportedVersions).slice(-1)[0]}`; }
+  catch{ $("#info").textContent="pricer not reachable"; }
+  SAMPLE=await (await fetch("/sample-claim.json")).json();
+  await loadProfiles();
+  const last=lsGet("ipps.lastClaim",null); fillSection("claimData", last||SAMPLE.claimData);
+  const ccn=lsGet("ipps.lastCcn",null); const pick=(ccn&&PROFILES[ccn])?ccn:(Object.keys(PROFILES)[0]||"");
+  if(pick) selectHospital(pick); else fillSection("providerData", SAMPLE.providerData);
+  window.addEventListener("beforeunload",()=>{ lsSet("ipps.lastClaim",readSection("claimData")); lsSet("ipps.lastCcn",currentCcn); });
+})();
+</script>
+</body>
+</html>

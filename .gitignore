@@ -1,0 +1,7 @@
+# runtime output
+ipps-pricer-ui/*.log
+__pycache__/
+.DS_Store
+# per-user editor/app settings
+.claude/
+.vscode/
