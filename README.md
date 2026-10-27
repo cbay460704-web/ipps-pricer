@@ -3,7 +3,8 @@
 Local web interface for the CMS IPPS Pricer (FY2019–FY2027). See [ipps-pricer-ui/README.md](ipps-pricer-ui/README.md)
 for setup, daily use, and notes on the pricer's behaviour.
 
-Quick start (needs Java 17 and Python 3):
+Quick start (needs Java 17 and Python 3). If you received this as a zip rather than a Git clone, the 28 MB pricer jar
+is not included; fetch it first with `sh ipps-pricer-ui/get-pricer-jar.sh` (it downloads from cms.gov).
 
 ```bash
 python3 ipps-pricer-ui/pricer_ui.py

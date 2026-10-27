@@ -11,3 +11,7 @@ ipps-pricer-ui/batches/
 
 # cached CMS hospital directory
 ipps-pricer-ui/hospital-names.json
+
+# email-sized bundle
+ipps-pricer-poc.zip
+results/
