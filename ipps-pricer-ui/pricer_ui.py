@@ -36,7 +36,18 @@ def find_java():
             return c
     sys.exit("Java 17 not found. Install with:  brew install openjdk@17")
 
+def pricer_already_running(base):
+    try:
+        urllib.request.urlopen(base + "/openapi.json", timeout=1).read()
+        return True
+    except Exception:
+        return False
+
 def start_pricer(jar, port):
+    base = f"http://localhost:{port}"
+    if pricer_already_running(base):
+        print(f"A pricer is already listening on port {port}; reusing it.", flush=True)
+        return None, base
     java = find_java()
     cmd = [java, "--add-opens", "java.base/java.lang=ALL-UNNAMED",
            f"-Ddw.supportedYears={YEARS}",
@@ -654,7 +665,12 @@ def main():
     proc, base = start_pricer(a.jar, a.pricer_port)
     Handler.base = base
     print(f"Pricer up at {base}", flush=True)
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    try:
+        srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    except OSError as e:
+        if proc: proc.terminate()
+        sys.exit(f"Port {a.port} is already in use (is another pricer_ui.py running?). "
+                 f"Stop it or start with --port <other>. ({e})")
     url = f"http://localhost:{a.port}/"
     print(f"UI at {url}  (Ctrl-C to stop)", flush=True)
     if not a.no_browser:
@@ -664,9 +680,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        proc.terminate()
-        try: proc.wait(5)
-        except subprocess.TimeoutExpired: proc.kill()
+        if proc:
+            proc.terminate()
+            try: proc.wait(5)
+            except subprocess.TimeoutExpired: proc.kill()
 
 if __name__ == "__main__":
     main()
