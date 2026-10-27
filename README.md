@@ -29,6 +29,9 @@ saved to `ipps-pricer-ui/profiles.json` and matched by CCN everywhere else in th
 ### 3. Price a spreadsheet of claims
 On the **Batch** tab, download the template, fill one row per claim (label, ccn, drg, discharge date, charges, los,
 covered days), drop the file on the page and press **Price N rows**. Each row is matched to a hospital by CCN.
-Download the results as .xlsx or .csv; click any row to see that claim's full response.
+Files are priced on the server with parallel workers, so size is not a concern: 50,000 claims take about 10 seconds.
+The page shows progress, a summary (paid / not paid / rejected counts and total payment) and the first 300 rows;
+the .xlsx and .csv downloads contain every row. Click any row in the table to see that claim's full response.
+Result files are kept in `ipps-pricer-ui/batches/` until you delete them.
 
 ![Batch pricing](docs/3-batch.jpg)

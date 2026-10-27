@@ -5,3 +5,6 @@ __pycache__/
 # per-user editor/app settings
 .claude/
 .vscode/
+
+# server-side batch outputs
+ipps-pricer-ui/batches/

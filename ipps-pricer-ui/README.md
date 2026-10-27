@@ -13,7 +13,7 @@ The pricer itself is `ipps-pricer-application-2.14.1.jar` (downloaded from cms.g
 python3 /Users/cheaney/Documents/ipps-pricer/ipps-pricer-ui/pricer_ui.py
 ```
 Opens http://localhost:8765. Ctrl-C stops both the UI and the pricer.
-Options: `--port`, `--pricer-port` (default 3000), `--jar`, `--no-browser`.
+Options: `--port`, `--pricer-port` (default 3000), `--jar`, `--no-browser`, `--host 0.0.0.0` (allow other machines on the network).
 
 ## Daily use
 1. **Hospitals tab** – enter each hospital once (CCN, dates, county, CBSA, beds, cost-to-charge ratios, DSH ratios,
@@ -24,6 +24,9 @@ Options: `--port`, `--pricer-port` (default 3000), `--jar`, `--no-browser`.
    under *Advanced claim details*.
 3. **Batch tab** – download the 7-column template (`label, ccn, drg, discharge date, charges, los, covered days`),
    fill one row per claim, drop the file on the page, press *Price N rows*, download results as .xlsx or .csv.
+   Dropped files are priced on the server with 8 parallel workers (about 4,000 claims/second; 50,000 rows in ~10 s)
+   and written to `batches/<job>-results.csv|.xlsx`; the page shows progress, totals and the first 300 rows.
+   Pasted rows are priced in the browser.
    Rows are matched to hospital profiles by CCN; a CCN with no profile uses the hospital currently selected.
    Extra columns named after any pricer field (e.g. `diagnosisCodes`, `provider.bedSize`) override values per row.
    Results keep every input column and add `out.*` columns (return code, total payment, operating/capital/outlier

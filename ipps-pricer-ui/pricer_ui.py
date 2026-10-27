@@ -2,19 +2,30 @@
 """Local web UI for the CMS IPPS Pricer.
 
 Starts the CMS pricer jar (a Dropwizard REST server) as a child process,
-serves a browser form on http://localhost:8765, and proxies form submissions
-to the pricer's /price-claim endpoint.
+serves a browser form on http://localhost:8765, proxies form submissions
+to the pricer's /price-claim endpoint, stores hospital profiles, and runs
+large spreadsheet batches server-side.
 
 Usage:  python3 pricer_ui.py [--jar PATH] [--port 8765] [--pricer-port 3000]
+No third-party packages are needed (xlsx files are read and written with the
+standard library).
 """
-import argparse, json, os, shutil, signal, subprocess, sys, time, threading
+import argparse, base64, csv, io, json, os, re, shutil, subprocess, sys, threading, time, uuid, zipfile
 import urllib.request, urllib.error
+import concurrent.futures as cf
+import xml.etree.ElementTree as ET
+from datetime import date, timedelta
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_JAR = os.path.join(HERE, "ipps-pricer-application-2.14.1.jar")
+PROFILES = os.path.join(HERE, "profiles.json")
+BATCH_DIR = os.path.join(HERE, "batches")
 YEARS = "2019,2020,2021,2022,2023,2024,2025,2026,2027"
 
+# ----------------------------------------------------------------------------
+# Pricer process
+# ----------------------------------------------------------------------------
 def find_java():
     cands = [os.environ.get("JAVA_HOME", "") and os.path.join(os.environ["JAVA_HOME"], "bin", "java"),
              "/opt/homebrew/opt/openjdk@17/bin/java",
@@ -38,7 +49,7 @@ def start_pricer(jar, port):
     base = f"http://localhost:{port}"
     for _ in range(120):
         if proc.poll() is not None:
-            sys.exit(f"Pricer exited early (see pricer.log)")
+            sys.exit("Pricer exited early (see pricer.log)")
         try:
             urllib.request.urlopen(base + "/openapi.json", timeout=1).read()
             return proc, base
@@ -47,23 +58,322 @@ def start_pricer(jar, port):
     proc.kill()
     sys.exit("Pricer did not start within 60s (see pricer.log)")
 
-PROFILES = os.path.join(HERE, "profiles.json")
-
+# ----------------------------------------------------------------------------
+# Profiles
+# ----------------------------------------------------------------------------
 def read_profiles():
-    """Provider profiles keyed by CCN, stored next to this script so they survive browser resets."""
+    """Provider profiles keyed by CCN, stored next to this script."""
     try:
         with open(PROFILES, "rb") as f:
             return f.read()
     except FileNotFoundError:
         return b"{}"
 
+# ----------------------------------------------------------------------------
+# Spreadsheet reading (xlsx via zip+xml, csv/tsv via csv module)
+# ----------------------------------------------------------------------------
+NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+def _col_index(ref):
+    n = 0
+    for ch in re.match(r"[A-Z]+", ref).group(0):
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+def read_xlsx_rows(data):
+    """Yield rows (lists of cell values) from the first worksheet of an xlsx file."""
+    z = zipfile.ZipFile(io.BytesIO(data))
+    names = z.namelist()
+    shared = []
+    if "xl/sharedStrings.xml" in names:
+        for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(NS + "si"):
+            shared.append("".join(t.text or "" for t in si.iter(NS + "t")))
+    # first sheet in workbook order
+    sheet = None
+    try:
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        rid = next(iter(wb.iter(NS + "sheet"))).get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        for r in rels:
+            if r.get("Id") == rid:
+                sheet = "xl/" + r.get("Target").lstrip("/").removeprefix("xl/")
+    except Exception:
+        pass
+    if not sheet or sheet not in names:
+        sheet = sorted(n for n in names if n.startswith("xl/worksheets/sheet"))[0]
+    for _, row in ET.iterparse(io.BytesIO(z.read(sheet))):
+        if row.tag != NS + "row":
+            continue
+        cells = []
+        for c in row.findall(NS + "c"):
+            idx = _col_index(c.get("r", "A1"))
+            t = c.get("t")
+            v = c.find(NS + "v")
+            if t == "inlineStr":
+                val = "".join(x.text or "" for x in c.iter(NS + "t"))
+            elif v is None or v.text is None:
+                val = ""
+            elif t == "s":
+                val = shared[int(v.text)]
+            elif t == "b":
+                val = v.text == "1"
+            elif t == "str" or t == "e":
+                val = v.text
+            else:
+                try:
+                    f = float(v.text); val = int(f) if f.is_integer() else f
+                except ValueError:
+                    val = v.text
+            while len(cells) < idx:
+                cells.append("")
+            cells.append(val)
+        yield cells
+        row.clear()
+
+def read_table(name, data):
+    """Return (headers, rows) where rows are dicts keyed by header text."""
+    if name.lower().endswith((".xlsx", ".xlsm")):
+        it = read_xlsx_rows(data)
+    else:
+        text = data.decode("utf-8-sig", errors="replace")
+        delim = "\t" if "\t" in text.split("\n", 1)[0] else ","
+        it = csv.reader(io.StringIO(text), delimiter=delim)
+    headers = None
+    rows = []
+    for cells in it:
+        if headers is None:
+            if not any(str(c).strip() for c in cells):
+                continue
+            headers = [str(c).strip() for c in cells]
+            continue
+        if not any(str(c).strip() for c in cells):
+            continue
+        rows.append({h: (cells[i] if i < len(cells) else "") for i, h in enumerate(headers) if h})
+    return headers or [], rows
+
+# ----------------------------------------------------------------------------
+# Spreadsheet writing (minimal xlsx with inline strings)
+# ----------------------------------------------------------------------------
+def _xml_escape(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+def write_xlsx(path, headers, rows_iter):
+    def cell(ref, v):
+        if v is None or v == "":
+            return ""
+        if isinstance(v, bool):
+            return f'<c r="{ref}" t="b"><v>{int(v)}</v></c>'
+        if isinstance(v, (int, float)):
+            return f'<c r="{ref}"><v>{v}</v></c>'
+        return f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{_xml_escape(v)}</t></is></c>'
+    def col_letter(i):
+        s = ""
+        i += 1
+        while i:
+            i, r = divmod(i - 1, 26); s = chr(65 + r) + s
+        return s
+    letters = [col_letter(i) for i in range(len(headers))]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="results" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        buf = io.StringIO()
+        buf.write('<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
+        buf.write("<row r=\"1\">" + "".join(cell(f"{letters[i]}1", h) for i, h in enumerate(headers)) + "</row>")
+        n = 1
+        for row in rows_iter:
+            n += 1
+            buf.write(f'<row r="{n}">' + "".join(cell(f"{letters[i]}{n}", row[i]) for i in range(len(headers))) + "</row>")
+        buf.write("</sheetData></worksheet>")
+        z.writestr("xl/worksheets/sheet1.xml", buf.getvalue())
+
+# ----------------------------------------------------------------------------
+# Row -> pricer request (mirrors the browser's rowToRequest; field rules come
+# from the browser in the job context so the definitions live in one place)
+# ----------------------------------------------------------------------------
+def excel_date(serial):
+    return (date(1899, 12, 30) + timedelta(days=int(serial))).isoformat()
+
+def fmt_date(v):
+    if isinstance(v, (int, float)) and 20000 < v < 80000:
+        return excel_date(v)
+    s = str(v).strip()
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if m:
+        return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return s
+
+def coerce(ctx, col, raw):
+    sec, name = col.split(".", 1)
+    f = ctx["fields"][sec].get(name)
+    if f is None or raw is None or str(raw).strip() == "":
+        return None
+    t = f.get("t")
+    if t == "number":
+        try:
+            x = float(str(raw).replace("$", "").replace(",", ""))
+        except ValueError:
+            return None
+        return int(x) if x.is_integer() else x
+    if t == "date":
+        return fmt_date(raw)
+    if t == "list":
+        return [p for p in re.split(r"[;|,\s]+", str(raw)) if p]
+    s = str(raw).strip()
+    if isinstance(raw, (int, float)) and float(raw).is_integer():
+        s = str(int(raw))
+    pad = ctx["pad"].get(col)
+    if pad and s.isdigit():
+        s = s.zfill(pad)
+    if col.startswith("provider.cbsa") and s.isdigit():
+        s = s.zfill(2 if int(s) < 100 else 5)
+    return s
+
+def apply_defaults(ctx, sec, out):
+    for name, f in ctx["fields"][sec].items():
+        if out.get(name) is None and f.get("d") is not None:
+            out[name] = f["d"]
+    for name, f in ctx["fields"][sec].items():
+        if out.get(name) is None and f.get("dFrom") and out.get(f["dFrom"]) is not None:
+            out[name] = out[f["dFrom"]]
+    if sec == "claim" and out.get("coveredDays") is None and out.get("lengthOfStay") is not None:
+        out["coveredDays"] = out["lengthOfStay"]
+    if sec == "provider" and out.get("stateCode") is None and out.get("countyCode"):
+        out["stateCode"] = str(out["countyCode"])[:2]
+    return {k: v for k, v in out.items() if v is not None}
+
+def row_to_request(ctx, profiles, row):
+    claim, prov = {}, {}
+    for header, raw in row.items():
+        col = ctx["headerMap"].get(header)
+        if not col or col == "label":
+            continue
+        v = coerce(ctx, col, raw)
+        if v is None:
+            continue
+        (claim if col.startswith("claim.") else prov)[col.split(".", 1)[1]] = v
+    ccn = claim.get("providerCcn") or ctx.get("currentCcn") or ctx["currentProvider"].get("providerCcn")
+    if ccn in profiles:
+        base = {k: v for k, v in profiles[ccn].items() if k != "name"}
+        hospital = f"{profiles[ccn].get('name') or ''} ({ccn})".strip()
+    else:
+        base = dict(ctx["currentProvider"])
+        hospital = f"{ccn} (not saved; used current hospital form)" if ccn else "no hospital"
+    provider = {**base, **prov}
+    provider.setdefault("providerCcn", ccn)
+    claim.setdefault("providerCcn", provider.get("providerCcn"))
+    return {"claimData": apply_defaults(ctx, "claim", claim),
+            "providerData": apply_defaults(ctx, "provider", provider)}, hospital
+
+def dig(o, path):
+    for k in path.split("."):
+        if not isinstance(o, dict):
+            return None
+        o = o.get(k)
+    return o
+
+# ----------------------------------------------------------------------------
+# Batch jobs
+# ----------------------------------------------------------------------------
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+PREVIEW_ROWS = 300
+
+def run_job(job, pricer_base, headers, rows, ctx):
+    try:
+        profiles = json.loads(read_profiles() or b"{}")
+    except Exception:
+        profiles = {}
+    out_cols = ctx["outCols"]                      # [[name, jsonPath], ...]
+    out_headers = headers + ["out." + c[0] for c in out_cols]
+    csv_path = os.path.join(BATCH_DIR, job["id"] + "-results.csv")
+    workers = max(1, min(32, int(ctx.get("concurrency", 8))))
+
+    def price(i):
+        req, hospital = row_to_request(ctx, profiles, rows[i])
+        body = json.dumps(req).encode()
+        r = urllib.request.Request(pricer_base + "/v2/price-claim", data=body, method="POST",
+                                   headers={"Content-Type": "application/json", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=60) as resp:
+                status, text = resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            status, text = e.code, e.read()
+        except Exception as e:
+            status, text = 0, json.dumps({"error": str(e)}).encode()
+        try:
+            res = json.loads(text)
+        except Exception:
+            res = {"raw": text.decode(errors="replace")[:300]}
+        res["_status"] = status
+        res["_hospital"] = hospital
+        if status != 200:
+            if res.get("violations"):
+                res["_error"] = "; ".join(f"{v.get('field','').replace('priceClaim.arg0.','')} {v.get('message','')}" for v in res["violations"])
+            else:
+                res["_error"] = res.get("detail") or res.get("error") or res.get("raw", "")[:200]
+        return i, req, res
+
+    job.update(status="running", total=len(rows), done=0, paid=0, notPaid=0, errors=0, totalPayment=0.0, started=time.time())
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(out_headers)
+        with cf.ThreadPoolExecutor(workers) as ex:
+            for i, req, res in ex.map(price, range(len(rows))):
+                row = rows[i]
+                outs = []
+                for name, path in out_cols:
+                    v = dig(res, path)
+                    outs.append("" if v is None else v)
+                w.writerow([row.get(h, "") for h in headers] + outs)
+                code = dig(res, "returnCodeData.code")
+                paid = res["_status"] == 200 and isinstance(code, str) and code.isdigit() and int(code) < 50
+                job["done"] += 1
+                if res["_status"] != 200:
+                    job["errors"] += 1
+                elif paid:
+                    job["paid"] += 1
+                    job["totalPayment"] += float(dig(res, "paymentData.totalPayment") or 0)
+                else:
+                    job["notPaid"] += 1
+                if i < PREVIEW_ROWS:
+                    job["preview"].append({"i": i, "row": row, "req": req, "res": res})
+    job["elapsed"] = round(time.time() - job["started"], 1)
+    job["status"] = "writing"
+    xlsx_path = csv_path[:-4] + ".xlsx"
+    try:
+        def rows_from_csv():
+            with open(csv_path, newline="") as f:
+                rd = csv.reader(f); next(rd)
+                for r in rd:
+                    yield [_num(c) for c in r]
+        write_xlsx(xlsx_path, out_headers, rows_from_csv())
+        job["xlsx"] = f"/batch/{job['id']}/results.xlsx"
+    except Exception as e:
+        job["xlsxError"] = str(e)
+    job["csv"] = f"/batch/{job['id']}/results.csv"
+    job["status"] = "done"
+
+def _num(s):
+    if s == "":
+        return ""
+    if re.fullmatch(r"-?\d+", s) and not (len(s) > 1 and s[0] == "0"):   # keep leading zeros as text
+        return int(s)
+    if re.fullmatch(r"-?\d+\.\d+", s):
+        return float(s)
+    return s
+
+# ----------------------------------------------------------------------------
+# HTTP handler
+# ----------------------------------------------------------------------------
 class Handler(SimpleHTTPRequestHandler):
     base = None
     def __init__(self, *a, **k):
         super().__init__(*a, directory=os.path.join(HERE, "static"), **k)
     def log_message(self, fmt, *args):
         line = fmt % args if args else fmt
-        if "/api/" in line or "/profiles" in line or "code " in line:
+        if "/api/" in line or "/profiles" in line or "/batch" in line or "code " in line:
             sys.stderr.write(f"[ui] {line}\n")
     def _proxy(self, method, path, body=None):
         req = urllib.request.Request(self.base + path, data=body, method=method,
@@ -75,51 +385,106 @@ class Handler(SimpleHTTPRequestHandler):
             return e.code, e.read()
         except Exception as e:
             return 502, json.dumps({"error": f"pricer unreachable: {e}"}).encode()
-    def _send(self, status, data):
+    def _send(self, status, data, ctype="application/json", extra=None):
+        if isinstance(data, (dict, list)):
+            data = json.dumps(data).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+    def _body(self):
+        n = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(n)
+    def _send_file(self, path, download_name):
+        if not os.path.exists(path):
+            return self._send(404, {"error": "not found"})
+        ctype = "text/csv" if path.endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(os.path.getsize(path)))
+        self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile)
+
     def do_GET(self):
         if self.path == "/profiles":
             return self._send(200, read_profiles())
+        m = re.match(r"^/batch/([0-9a-f]{12})(?:/(results\.csv|results\.xlsx))?$", self.path)
+        if m:
+            job = JOBS.get(m.group(1))
+            if not job:
+                return self._send(404, {"error": "no such job"})
+            if m.group(2):
+                return self._send_file(os.path.join(BATCH_DIR, f"{job['id']}-{m.group(2)}"), f"{job['name']}-{m.group(2)}")
+            pub = {k: v for k, v in job.items() if k != "preview"}
+            if self.headers.get("X-Preview") == "1":
+                pub["preview"] = job["preview"]
+            return self._send(200, pub)
         if self.path.startswith("/api/"):
-            self._send(*self._proxy("GET", self.path[4:]))
-        else:
-            super().do_GET()
+            return self._send(*self._proxy("GET", self.path[4:]))
+        super().do_GET()
+
     def do_PUT(self):
         if self.path == "/profiles":
-            n = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(n)
             try:
-                data = json.loads(body)
+                data = json.loads(self._body())
                 assert isinstance(data, dict)
             except Exception:
-                return self._send(400, b'{"error":"profiles must be a JSON object keyed by CCN"}')
+                return self._send(400, {"error": "profiles must be a JSON object keyed by CCN"})
             with open(PROFILES, "w") as f:
                 json.dump(data, f, indent=2)
-            return self._send(200, b'{"ok":true}')
+            return self._send(200, {"ok": True})
         self.send_error(404)
-    def do_POST(self):
-        if self.path.startswith("/api/"):
-            n = int(self.headers.get("Content-Length", 0))
-            self._send(*self._proxy("POST", self.path[4:], self.rfile.read(n)))
-        else:
-            self.send_error(404)
 
+    def do_POST(self):
+        if self.path == "/batch/headers":
+            # Return just the header row of an uploaded file so the browser can map columns.
+            try:
+                p = json.loads(self._body())
+                data = base64.b64decode(p["file"])
+                headers, rows = read_table(p["name"], data)
+                return self._send(200, {"headers": headers, "rows": len(rows)})
+            except Exception as e:
+                return self._send(400, {"error": f"could not read file: {e}"})
+        if self.path == "/batch":
+            try:
+                p = json.loads(self._body())
+                data = base64.b64decode(p["file"])
+                headers, rows = read_table(p["name"], data)
+                ctx = p["context"]
+                ctx["fields"] = {"claim": {f["n"]: f for f in ctx["claimFields"]}, "provider": {f["n"]: f for f in ctx["providerFields"]}}
+            except Exception as e:
+                return self._send(400, {"error": f"bad batch request: {e}"})
+            os.makedirs(BATCH_DIR, exist_ok=True)
+            job_id = uuid.uuid4().hex[:12]
+            job = {"id": job_id, "name": re.sub(r"\.[^.]+$", "", os.path.basename(p["name"])) or "claims",
+                   "status": "queued", "total": len(rows), "done": 0, "preview": [], "headers": headers}
+            with JOBS_LOCK:
+                JOBS[job_id] = job
+            threading.Thread(target=run_job, args=(job, self.base, headers, rows, ctx), daemon=True).start()
+            return self._send(200, {"id": job_id, "total": len(rows), "headers": headers})
+        if self.path.startswith("/api/"):
+            return self._send(*self._proxy("POST", self.path[4:], self._body()))
+        self.send_error(404)
+
+# ----------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--jar", default=DEFAULT_JAR)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--pricer-port", type=int, default=3000)
+    ap.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to let other machines on the network connect")
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args()
     print(f"Starting IPPS pricer from {a.jar} ...", flush=True)
     proc, base = start_pricer(a.jar, a.pricer_port)
     Handler.base = base
     print(f"Pricer up at {base}", flush=True)
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://localhost:{a.port}/"
     print(f"UI at {url}  (Ctrl-C to stop)", flush=True)
     if not a.no_browser:

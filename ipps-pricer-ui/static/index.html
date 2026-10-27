@@ -125,7 +125,8 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
         <h2>Batch pricing from a spreadsheet</h2>
         <p class="meta">One claim per row, seven columns: <b>label, ccn, drg, discharge date, charges, los, covered days</b>.
           Hospitals are matched by CCN to the saved profiles on the Hospitals tab; a CCN with no profile uses the hospital selected on the Price a claim tab.
-          Any extra pricer field can be added as its own column (for example <code>diagnosisCodes</code> or <code>provider.bedSize</code>).</p>
+          Any extra pricer field can be added as its own column (for example <code>diagnosisCodes</code> or <code>provider.bedSize</code>).
+          Files are priced on the server with parallel workers, so tens of thousands of rows take well under a minute; results are written to a file you download when it finishes.</p>
         <div class="row" style="margin-bottom:10px">
           <button class="ghost" id="tpl-xlsx">Download template (.xlsx)</button>
           <button class="ghost" id="tpl-csv">Download template (.csv)</button>
@@ -491,6 +492,7 @@ const OUT_COLS = [["rc","returnCodeData.code"],["rcDescription","returnCodeData.
   ["finalWageIndex","paymentData.finalWageIndex"],["drgWeight","additionalCalculationVariables.drgRelativeWeight"],["regularDaysUsed","paymentData.regularDaysUsed"],
   ["outlierDays","paymentData.outlierDays"],["hospital","_hospital"],["calcVersion","calculationVersion"],["httpStatus","_status"],["error","_error"]];
 let batchRows=[], batchHeaders=[], batchMap={}, batchResults=[];
+let pendingUpload=null, serverJob=null;   // files are priced server-side; pasted rows in the browser
 
 function fmtDate(v){ if(v instanceof Date) return isNaN(v)?"":v.toISOString().slice(0,10);
   if(typeof v==="number" && v>20000 && v<80000){ return new Date(Math.round((v-25569)*86400000)).toISOString().slice(0,10); }
@@ -538,19 +540,59 @@ function parseDelimited(text){
   const headers=nonEmpty[0].map(h=>h.trim());
   return {headers, rows: nonEmpty.slice(1).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??""])))};
 }
+function fileToBase64(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej; r.readAsDataURL(file); }); }
 async function loadFile(file){
-  if(/\.xlsx?$/i.test(file.name) && window.XLSX){
-    const wb=XLSX.read(await file.arrayBuffer(),{cellDates:true}); const ws=wb.Sheets[wb.SheetNames[0]];
-    const rows=XLSX.utils.sheet_to_json(ws,{defval:""}); const headers=rows.length?Object.keys(rows[0]):[];
-    setRows(headers, rows, file.name);
-  } else { const {headers,rows}=parseDelimited(await file.text()); setRows(headers,rows,file.name); }
+  $("#batch-status").textContent=`reading ${file.name}…`; $("#batch-run").disabled=true;
+  try{
+    const b64=await fileToBase64(file);
+    const r=await fetch("/batch/headers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:file.name,file:b64})});
+    const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText);
+    serverJob=null; batchResults=[]; batchRows=[]; batchHeaders=j.headers; batchMap={};
+    const unknown=[]; for(const h of j.headers){ const c=resolveHeader(h); if(c) batchMap[h]=c; else if(h.trim()) unknown.push(h); }
+    pendingUpload={name:file.name,b64,rows:j.rows};
+    const known=Object.values(batchMap).filter(c=>c!=="label").length;
+    $("#batch-run").disabled=j.rows===0; $("#batch-run").textContent=`Price ${j.rows.toLocaleString()} row${j.rows===1?"":"s"}`;
+    $("#batch-xlsx").disabled=$("#batch-csv").disabled=true; $("#batch-table").classList.add("hidden");
+    $("#batch-status").textContent=`${file.name}: ${j.rows.toLocaleString()} rows, ${known} pricer columns recognized${unknown.length?`, ignored: ${unknown.join(", ")}`:""}`;
+  }catch(e){ $("#batch-status").textContent="Could not read file: "+e.message; }
+}
+function batchContext(){
+  const slim=f=>({n:f.n,t:f.t,d:f.d,dFrom:f.dFrom});
+  return {claimFields:ALL.claimData.map(slim), providerFields:ALL.providerData.map(slim), headerMap:batchMap, pad:PAD, outCols:OUT_COLS,
+          currentCcn, currentProvider:readSection("providerData"), concurrency:8};
+}
+async function runServerBatch(){
+  const up=pendingUpload; $("#batch-run").disabled=true; $("#batch-progress").classList.remove("hidden"); const bar=$("#batch-progress div"); bar.style.width="0";
+  $("#batch-status").textContent="uploading…";
+  let j;
+  try{
+    const r=await fetch("/batch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:up.name,file:up.b64,context:batchContext()})});
+    j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText);
+  }catch(e){ $("#batch-status").textContent="Batch failed: "+e.message; $("#batch-run").disabled=false; return; }
+  serverJob={id:j.id};
+  while(true){
+    await new Promise(r=>setTimeout(r,400));
+    const st=await (await fetch(`/batch/${j.id}`)).json(); serverJob=st;
+    bar.style.width=`${st.total?100*st.done/st.total:0}%`;
+    if(st.status==="done"||st.status==="writing"){
+      if(st.status==="writing"){ $("#batch-status").textContent=`priced ${st.done.toLocaleString()} rows in ${st.elapsed}s · writing results file…`; continue; }
+      const full=await (await fetch(`/batch/${j.id}`,{headers:{"X-Preview":"1"}})).json(); serverJob=full;
+      batchRows=full.preview.map(p=>p.row); batchResults=full.preview.map(p=>({req:p.req,res:p.res}));
+      renderBatchTable();
+      $("#batch-status").textContent=`done: ${full.total.toLocaleString()} rows in ${full.elapsed}s · ${full.paid.toLocaleString()} paid · ${full.notPaid.toLocaleString()} not paid · ${full.errors.toLocaleString()} rejected · total ${money(full.totalPayment)}`+(full.total>batchRows.length?` · table shows first ${batchRows.length}; downloads have every row`:"");
+      $("#batch-run").disabled=false; $("#batch-csv").disabled=false; $("#batch-xlsx").disabled=!full.xlsx;
+      if(full.xlsxError) toast("xlsx export failed: "+full.xlsxError);
+      return;
+    }
+    $("#batch-status").textContent=`priced ${st.done.toLocaleString()} / ${st.total.toLocaleString()}…`;
+  }
 }
 $("#drop").addEventListener("click",()=>$("#file").click());
 $("#file").addEventListener("change",e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); e.target.value=""; });
 for(const ev of ["dragenter","dragover"]) $("#drop").addEventListener(ev,e=>{e.preventDefault();$("#drop").classList.add("over");});
 for(const ev of ["dragleave","drop"]) $("#drop").addEventListener(ev,e=>{e.preventDefault();$("#drop").classList.remove("over");});
 $("#drop").addEventListener("drop",e=>{ const f=e.dataTransfer.files[0]; if(f) loadFile(f); });
-$("#paste-load").addEventListener("click",()=>{ const {headers,rows}=parseDelimited($("#paste").value); setRows(headers,rows,"pasted text"); });
+$("#paste-load").addEventListener("click",()=>{ pendingUpload=null; serverJob=null; const {headers,rows}=parseDelimited($("#paste").value); setRows(headers,rows,"pasted text"); });
 
 const SHORT_HEADERS=["label","ccn","drg","discharge date","charges","los","covered days"];
 function templateRows(full){
@@ -572,6 +614,7 @@ $("#tpl-csv").addEventListener("click",()=>downloadBlob("ipps-claims-template.cs
 $("#tpl-full").addEventListener("click",()=>{ const r=templateRows(true); downloadXlsx("ipps-claims-template-full.xlsx",r,Object.keys(r[0])); });
 
 $("#batch-run").addEventListener("click",async()=>{
+  if(pendingUpload) return runServerBatch();
   const stopOnErr=$("#batch-stop").checked; batchResults=new Array(batchRows.length);
   $("#batch-run").disabled=true; $("#batch-progress").classList.remove("hidden"); const bar=$("#batch-progress div"); let done=0, t0=Date.now(), limit=batchRows.length;
   const worker=async(idx)=>{ while(idx<limit){
@@ -594,8 +637,8 @@ $("#batch-run").addEventListener("click",async()=>{
 });
 function resultRows(){ return batchRows.map((row,i)=>{ const out={...row}; const x=batchResults[i]; if(x) for(const [k,p] of OUT_COLS){ const v=dig(x.res,p); out["out."+k]=v==null?"":v; } return out; }); }
 function resultHeaders(){ return [...batchHeaders, ...OUT_COLS.map(([k])=>"out."+k)]; }
-$("#batch-xlsx").addEventListener("click",()=>downloadXlsx("ipps-batch-results.xlsx",resultRows(),resultHeaders()));
-$("#batch-csv").addEventListener("click",()=>downloadBlob("ipps-batch-results.csv",new Blob([toCsv(resultRows(),resultHeaders())],{type:"text/csv"})));
+$("#batch-xlsx").addEventListener("click",()=>{ if(serverJob?.xlsx) return window.location.assign(serverJob.xlsx); downloadXlsx("ipps-batch-results.xlsx",resultRows(),resultHeaders()); });
+$("#batch-csv").addEventListener("click",()=>{ if(serverJob?.csv) return window.location.assign(serverJob.csv); downloadBlob("ipps-batch-results.csv",new Blob([toCsv(resultRows(),resultHeaders())],{type:"text/csv"})); });
 function renderBatchTable(){
   const box=$("#batch-table"); box.classList.toggle("hidden",!batchRows.length); if(!batchRows.length) return;
   const want=["label","claim.providerCcn","claim.diagnosisRelatedGroup","claim.dischargeDate","claim.coveredCharges","claim.lengthOfStay"];
