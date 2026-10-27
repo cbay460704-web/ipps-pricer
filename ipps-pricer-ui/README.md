@@ -16,9 +16,11 @@ Opens http://localhost:8765. Ctrl-C stops both the UI and the pricer.
 Options: `--port`, `--pricer-port` (default 3000), `--jar`, `--no-browser`, `--host 0.0.0.0` (allow other machines on the network).
 
 ## Daily use
-1. **Hospitals tab** – enter each hospital once (CCN, dates, county, CBSA, beds, cost-to-charge ratios, DSH ratios,
-   uncompensated care, IME ratios, VBP/HRRP factors). Only the *Essentials* group normally needs values; the other
-   groups default to what a standard hospital has. Profiles are saved to `profiles.json` next to the app.
+1. **Hospitals tab** – press *Import from CMS* to load every IPPS hospital's current Provider Specific File record
+   (about 3,100 hospitals, with names) straight from CMS; filter by state if you want fewer. `POST /psf/import` does
+   the work (`{source:"cms"|"file", asOf, states, ippsOnly, replace}`), mapping PSF columns to pricer fields via
+   `PSF_MAP` in `pricer_ui.py`. Hospitals can also be entered or edited by hand; only the *Essentials* group normally
+   needs values. Profiles are saved to `profiles.json` next to the app, keyed by CCN.
 2. **Price a claim tab** – pick the hospital, enter DRG, discharge date, charges, length of stay, press *Price claim*.
    Covered days defaults to the length of stay. Review code, lifetime reserve days and diagnosis/procedure codes are
    under *Advanced claim details*.

@@ -76,7 +76,8 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
 .progress{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:8px 0}
 .progress div{height:100%;background:var(--accent);width:0;transition:width .15s}
 .hospital-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
-.hospital-bar select{min-width:260px}
+.hospital-bar select{min-width:260px;max-width:420px}
+.hospital-bar input.ghost{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font:inherit}
 .pill{font-size:12px;color:var(--muted)}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -102,6 +103,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
         <h2>Quick price</h2>
         <div class="hospital-bar">
           <span class="pill">Hospital</span>
+          <input class="ghost" id="hospital-filter" placeholder="find by name or CCN…" style="width:200px">
           <select class="ghost" id="hospital"></select>
           <button class="ghost" id="edit-hospital">Edit</button>
           <span class="pill" id="hospital-hint"></span>
@@ -155,7 +157,26 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:
         <h2>Hospital profiles</h2>
         <p class="meta">Enter each hospital's Provider Specific File values once. Profiles are saved to <code>profiles.json</code> next to the app and matched by CCN.
           Only the <b>Essentials</b> group normally needs filling in; everything else defaults to the values a standard hospital has.</p>
+        <details class="adv" id="psf-import" style="margin-bottom:12px">
+          <summary>Import hospitals from CMS (Provider Specific File)</summary>
+          <p class="meta" style="margin-top:6px">Pulls the current Provider Specific File record for every IPPS acute-care hospital from CMS's Provider Data Service
+            and the hospital names from CMS's hospital directory. Nothing to type: about 3,100 hospitals nationwide, or filter by state.
+            Re-run after each quarterly CMS update. Existing profiles with the same CCN are replaced; your own additions are kept.</p>
+          <div class="row">
+            <label class="pill">As of <input type="date" class="ghost" id="psf-asof"></label>
+            <label class="pill">States <input class="ghost" id="psf-states" placeholder="all, or e.g. AL, GA" style="width:130px"></label>
+            <label class="pill"><input type="checkbox" id="psf-ipps" checked style="vertical-align:middle"> IPPS acute-care hospitals only</label>
+            <label class="pill"><input type="checkbox" id="psf-replace" style="vertical-align:middle"> replace all existing profiles</label>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="primary" id="psf-go">Import from CMS</button>
+            <button class="ghost" id="psf-file-btn">Import a downloaded PSF .csv…</button>
+            <input type="file" id="psf-file" accept=".csv,.txt" class="hidden">
+            <span class="pill" id="psf-status"></span>
+          </div>
+        </details>
         <div class="hospital-bar">
+          <input class="ghost" id="profile-filter" placeholder="find by name or CCN…" style="width:200px">
           <select class="ghost" id="profile-select"></select>
           <button class="ghost" id="profile-new">New</button>
           <button class="primary" id="profile-save">Save profile</button>
@@ -381,16 +402,17 @@ async function lookup(kind, input, hint){
 // ---------- hospitals (profiles, saved on the server in profiles.json) ----------
 let PROFILES={};           // ccn -> {name, ...providerData}
 let currentCcn=null;       // profile loaded in the Hospitals form / selected on quick card
-const stripName = p => { const {name, ...rest}=p||{}; return rest; };
+const stripName = p => { const {name, source, ...rest}=p||{}; return rest; };
 async function loadProfiles(){ try{ PROFILES=await (await fetch("/profiles")).json(); }catch{ PROFILES={}; } refreshHospitalSelects(); }
 async function saveProfiles(){ const r=await fetch("/profiles",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(PROFILES)}); if(!r.ok) throw new Error("save failed"); }
 function profileLabel(ccn){ const p=PROFILES[ccn]; return p?.name?`${p.name} (${ccn})`:ccn; }
 function refreshHospitalSelects(){
-  for(const sel of [$("#hospital"),$("#profile-select")]){
-    const keep=sel.value; sel.innerHTML="";
+  for(const [sel,filt] of [[$("#hospital"),$("#hospital-filter")],[$("#profile-select"),$("#profile-filter")]]){
+    const keep=sel.value; sel.innerHTML=""; const q=(filt.value||"").trim().toLowerCase();
     sel.append(el("option",{value:""},sel.id==="hospital"?"— choose a hospital —":"— new profile —"));
-    for(const ccn of Object.keys(PROFILES).sort()) sel.append(el("option",{value:ccn},profileLabel(ccn)));
-    sel.value=Object.keys(PROFILES).includes(keep)?keep:(currentCcn&&PROFILES[currentCcn]?currentCcn:"");
+    let n=0; for(const ccn of Object.keys(PROFILES).sort((a,b)=>profileLabel(a).localeCompare(profileLabel(b)))){ const lab=profileLabel(ccn); if(q && !lab.toLowerCase().includes(q)) continue; sel.append(el("option",{value:ccn},lab)); n++; }
+    if(q && n===0) sel.append(el("option",{value:"",disabled:""},"no match"));
+    sel.value=[...sel.options].some(o=>o.value===keep)?keep:(currentCcn&&PROFILES[currentCcn]&&[...sel.options].some(o=>o.value===currentCcn)?currentCcn:"");
   }
   $("#hospital-hint").textContent=Object.keys(PROFILES).length?"":"No hospitals saved yet. Open the Hospitals tab to add one.";
 }
@@ -402,6 +424,24 @@ function selectHospital(ccn){
   $("#profile-status").textContent=ccn?`editing ${profileLabel(ccn)}`:"new profile";
 }
 $("#hospital").addEventListener("change",e=>selectHospital(e.target.value));
+for(const [f,sel] of [["#hospital-filter","#hospital"],["#profile-filter","#profile-select"]]) $(f).addEventListener("input",()=>{ refreshHospitalSelects(); const s=$(sel); if($(f).value.trim() && s.options.length===2 && s.options[1].value){ selectHospital(s.options[1].value); } });
+// --- CMS PSF import ---
+$("#psf-asof").value=new Date().toISOString().slice(0,10);
+async function psfImport(extra){
+  const body={asOf:$("#psf-asof").value, states:$("#psf-states").value, ippsOnly:$("#psf-ipps").checked, replace:$("#psf-replace").checked, names:true, ...extra};
+  if(body.replace && !confirm("Replace ALL existing hospital profiles with the CMS import?")) return;
+  $("#psf-go").disabled=$("#psf-file-btn").disabled=true; $("#psf-status").textContent=body.source==="file"?"reading file…":"downloading from CMS (10–30 s)…";
+  try{
+    const r=await fetch("/psf/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText);
+    $("#psf-status").textContent=`imported ${j.hospitals.toLocaleString()} hospitals (${j.named.toLocaleString()} with names) as of ${j.asOf}; ${j.totalProfiles.toLocaleString()} profiles total`+(j.namesError?` · names unavailable: ${j.namesError}`:"");
+    await loadProfiles(); if(currentCcn && PROFILES[currentCcn]) selectHospital(currentCcn);
+  }catch(e){ $("#psf-status").textContent="Import failed: "+e.message; }
+  finally{ $("#psf-go").disabled=$("#psf-file-btn").disabled=false; }
+}
+$("#psf-go").addEventListener("click",()=>psfImport({source:"cms"}));
+$("#psf-file-btn").addEventListener("click",()=>$("#psf-file").click());
+$("#psf-file").addEventListener("change",async e=>{ const f=e.target.files[0]; e.target.value=""; if(!f) return; psfImport({source:"file",name:f.name,file:await fileToBase64(f)}); });
 $("#profile-select").addEventListener("change",e=>selectHospital(e.target.value));
 $("#edit-hospital").addEventListener("click",()=>showTab("hospitals"));
 $("#profile-new").addEventListener("click",()=>{ selectHospital(""); fillSection("providerData",{}); $("#profile-status").textContent="new profile: fill in Essentials, then Save"; document.getElementById("providerData.providerCcn").focus(); });

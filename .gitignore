@@ -8,3 +8,6 @@ __pycache__/
 
 # server-side batch outputs
 ipps-pricer-ui/batches/
+
+# cached CMS hospital directory
+ipps-pricer-ui/hospital-names.json

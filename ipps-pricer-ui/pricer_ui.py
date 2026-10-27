@@ -255,7 +255,7 @@ def row_to_request(ctx, profiles, row):
         (claim if col.startswith("claim.") else prov)[col.split(".", 1)[1]] = v
     ccn = claim.get("providerCcn") or ctx.get("currentCcn") or ctx["currentProvider"].get("providerCcn")
     if ccn in profiles:
-        base = {k: v for k, v in profiles[ccn].items() if k != "name"}
+        base = {k: v for k, v in profiles[ccn].items() if k not in ("name", "source")}
         hospital = f"{profiles[ccn].get('name') or ''} ({ccn})".strip()
     else:
         base = dict(ctx["currentProvider"])
@@ -365,6 +365,170 @@ def _num(s):
     return s
 
 # ----------------------------------------------------------------------------
+# CMS Provider Specific File (PSF) import
+#   Source: CMS Provider Data Service export, https://pds.webpricer.cms.gov/fiss/inpatient/export
+#   (CSV, one record per provider per effective date; filters: fromDate, toDate, state, oscarNumber)
+#   Names:  CMS Hospital General Information dataset (data.cms.gov provider-data, dataset xubh-q36u)
+# ----------------------------------------------------------------------------
+PSF_EXPORT = "https://pds.webpricer.cms.gov/fiss/inpatient/export"
+HOSP_DIR_API = "https://data.cms.gov/provider-data/api/1/datastore/query/xubh-q36u/0"
+NAMES_CACHE = os.path.join(HERE, "hospital-names.json")
+
+# PSF column -> pricer field. Columns not listed are not used by the IPPS pricer.
+PSF_MAP = {
+    "oscarNumber": "providerCcn", "effectiveDate": "effectiveDate", "fiscalYearBeginningDate": "fiscalYearBeginDate",
+    "terminationDate": "terminationDate", "waiverIndicator": "waiverIndicator", "intermediaryNumber": "intermediaryNumber",
+    "providerType": "providerType", "temporaryReliefIndicator": "temporaryReliefIndicator", "federalPpsBlend": "federalPpsBlend",
+    "state": "stateCode", "countyCode": "countyCode",
+    "caseMixAdjustedCostPerDischarge_PpsFacilitySpecificRate": "ppsFacilitySpecificRate",
+    "costOfLivingAdjustment": "costOfLivingAdjustment", "internsToBedsRatio": "internsToBedsRatio", "bedSize": "bedSize",
+    "operatingCostToChargeRatio": "operatingCostToChargeRatio", "supplementalSecurityIncomeRatio": "supplementalSecurityIncomeRatio",
+    "medicaidRatio": "medicaidRatio", "specialPaymentIndicator": "specialPaymentIndicator", "hospitalQualityIndicator": "hospitalQualityIndicator",
+    "actualGeographicLocation_CBSA": "cbsaActualGeographicLocation", "wageIndexLocation_CBSA": "cbsaWageIndexLocation",
+    "standardizedAmountLocation_CBSA": "cbsaStandardizedAmountLocation", "specialWageIndex": "specialWageIndex",
+    "passThroughAmountForCapital": "passThroughAmountForCapital",
+    "passThroughAmountForDirectMedicalEducation": "passThroughAmountForDirectMedicalEducation",
+    "passThroughAmountForOrganAcquisition": "passThroughAmountForOrganAcquisition", "totalPassThroughAmount": "passThroughTotalAmount",
+    "capitalPpsPaymentCode": "capitalPpsPaymentCode", "oldCapitalHoldHarmlessRate": "oldCapitalHoldHarmlessRate",
+    "capitalCostToChargeRatio": "capitalCostToChargeRatio", "newHospital": "newHospital",
+    "capitalIndirectMedicalEducationRatio": "capitalIndirectMedicalEducationRatio", "capitalExceptionPaymentRate": "capitalExceptionPaymentRate",
+    "valueBasedPurchasingParticipant": "vbpParticipantIndicator", "valueBasedPurchasingAdjustment": "vbpAdjustment",
+    "hospitalReadmissionsReductionProgramParticipant": "hrrParticipantIndicator", "hospitalReadmissionsReductionAdjustment": "hrrAdjustment",
+    "bundleModel1Discount": "bundleModel1Discount", "hospitalAcquiredConditionReductionProgramParticipant": "hacReductionParticipantIndicator",
+    "uncompensatedCareAmount": "uncompensatedCareAmount", "electronicHealthRecordsProgramReduction": "ehrReductionIndicator",
+    "lowVolumeAdjustmentFactor": "lowVolumeAdjustmentFactor", "medicarePerformanceAdjustment": "medicarePerformanceAdjustment",
+    "ltchDppIndicator": "ltchDppIndicator", "supplementalWageIndex": "supplementalWageIndex",
+    "supplementalWageIndexFlag": "supplementalWageIndexIndicator",
+    "passThroughAmountForAllogenicStemCellAcquisition": "passThroughAmountForAllogenicStemCellAcquisition",
+    "passThroughAmountForSupplyChain": "passThroughAmountForSupplyChainCosts",
+}
+PSF_DATES = {"effectiveDate", "fiscalYearBeginDate", "terminationDate"}
+PSF_NUMBERS = {"ppsFacilitySpecificRate","costOfLivingAdjustment","internsToBedsRatio","bedSize","operatingCostToChargeRatio",
+    "supplementalSecurityIncomeRatio","medicaidRatio","specialWageIndex","passThroughAmountForCapital","passThroughAmountForDirectMedicalEducation",
+    "passThroughAmountForOrganAcquisition","passThroughTotalAmount","oldCapitalHoldHarmlessRate","capitalCostToChargeRatio",
+    "capitalIndirectMedicalEducationRatio","capitalExceptionPaymentRate","vbpAdjustment","hrrAdjustment","bundleModel1Discount",
+    "uncompensatedCareAmount","lowVolumeAdjustmentFactor","medicarePerformanceAdjustment","supplementalWageIndex",
+    "passThroughAmountForAllogenicStemCellAcquisition","passThroughAmountForSupplyChainCosts"}
+
+def is_ipps_ccn(ccn):
+    """Short-term acute-care hospitals carry CCN sequence numbers 0001-0879."""
+    tail = ccn[-4:]
+    return tail.isdigit() and 1 <= int(tail) <= 879
+
+def psf_to_profile(r):
+    out = {}
+    for col, field in PSF_MAP.items():
+        v = (r.get(col) or "").strip()
+        if v == "":
+            continue
+        if field in PSF_DATES:
+            if re.fullmatch(r"\d{8}", v):
+                v = f"{v[:4]}-{v[4:6]}-{v[6:]}"
+        elif field in PSF_NUMBERS:
+            try:
+                x = float(v); v = int(x) if field == "bedSize" else x
+            except ValueError:
+                continue
+        elif field.startswith("cbsa"):
+            v = v.zfill(2 if len(v) <= 2 else 5)
+        elif field in ("vbpParticipantIndicator", "hacReductionParticipantIndicator"):
+            v = {"1": "Y", "0": "N"}.get(v, v)
+        out[field] = v
+    # the PSF keeps historic termination dates on active records; the pricer only accepts one at/after the effective date
+    if out.get("terminationDate") and out["terminationDate"] < out.get("effectiveDate", ""):
+        del out["terminationDate"]
+    if out.get("ehrReductionIndicator") not in (None, "Y"):
+        del out["ehrReductionIndicator"]
+    return out
+
+def fetch_hospital_names():
+    """CCN -> {name, city, state} from the CMS hospital directory, cached for a day."""
+    try:
+        st = os.stat(NAMES_CACHE)
+        if time.time() - st.st_mtime < 86400:
+            return json.load(open(NAMES_CACHE))
+    except FileNotFoundError:
+        pass
+    names = {}
+    off = 0
+    while True:
+        d = json.load(urllib.request.urlopen(f"{HOSP_DIR_API}?limit=1500&offset={off}", timeout=90))
+        res = d.get("results", [])
+        for h in res:
+            names[h["facility_id"]] = {"name": h.get("facility_name", "").title(), "city": h.get("citytown", "").title(), "state": h.get("state", "")}
+        if len(res) < 1500:
+            break
+        off += 1500
+    json.dump(names, open(NAMES_CACHE, "w"))
+    return names
+
+def import_psf(rows, as_of, states, ipps_only, with_names):
+    """rows: PSF CSV dict rows. Returns (profiles dict keyed by CCN, stats)."""
+    as_of_c = as_of.replace("-", "")
+    best = {}
+    seen = skipped_type = skipped_state = 0
+    for r in rows:
+        seen += 1
+        ccn = (r.get("oscarNumber") or "").strip()
+        eff = (r.get("effectiveDate") or "").strip()
+        if not ccn or not eff or eff > as_of_c:
+            continue
+        if ipps_only and not (is_ipps_ccn(ccn) and (r.get("capitalPpsPaymentCode") or "").strip() in ("B", "C")):
+            skipped_type += 1; continue
+        if states and (r.get("state") or "").strip() not in states:
+            skipped_state += 1; continue
+        if ccn not in best or eff > best[ccn]["effectiveDate"]:
+            best[ccn] = r
+    names = {}
+    if with_names:
+        try:
+            names = fetch_hospital_names()
+        except Exception as e:
+            names = {"_error": str(e)}
+    profiles = {}
+    for ccn, r in best.items():
+        prof = psf_to_profile(r)
+        n = names.get(ccn)
+        prof["name"] = f"{n['name']}, {n['city']} {n['state']}".strip(", ") if n else ""
+        prof["source"] = f"CMS PSF effective {prof.get('effectiveDate','')}, imported {date.today().isoformat()}"
+        profiles[ccn] = prof
+    stats = {"recordsRead": seen, "hospitals": len(profiles), "skippedNotIpps": skipped_type, "skippedState": skipped_state,
+             "named": sum(1 for p in profiles.values() if p["name"]), "namesError": names.get("_error")}
+    return profiles, stats
+
+STATE_ABBR = {"01":"AL","02":"AK","03":"AZ","04":"AR","05":"CA","06":"CO","07":"CT","08":"DE","09":"DC","10":"FL","11":"GA","12":"HI","13":"ID",
+    "14":"IL","15":"IN","16":"IA","17":"KS","18":"KY","19":"LA","20":"ME","21":"MD","22":"MA","23":"MI","24":"MN","25":"MS","26":"MO","27":"MT",
+    "28":"NE","29":"NV","30":"NH","31":"NJ","32":"NM","33":"NY","34":"NC","35":"ND","36":"OH","37":"OK","38":"OR","39":"PA","40":"PR","41":"RI",
+    "42":"SC","43":"SD","44":"TN","45":"TX","46":"UT","47":"VT","48":"VI","49":"VA","50":"WA","51":"WV","52":"WI","53":"WY","54":"GU","55":"AS","56":"MP"}
+ABBR_STATE = {v: k for k, v in STATE_ABBR.items()}
+
+def run_psf_import(p):
+    """p: {source:'cms'|'file', file?, name?, asOf, states?, ippsOnly, replace, names}"""
+    as_of = p.get("asOf") or date.today().isoformat()
+    abbrs = [x.strip().upper() for x in re.split(r"[,\s]+", p.get("states") or "") if x.strip()]
+    state_codes = {ABBR_STATE[a] for a in abbrs if a in ABBR_STATE}
+    if p.get("source") == "file":
+        data = base64.b64decode(p["file"])
+    else:
+        # the PSF carries one record per effective date; 15 months back guarantees the current record for every provider
+        y, m, d = map(int, as_of.split("-"))
+        frm = date(y - 1 if m > 3 else y - 2, (m - 3 - 1) % 12 + 1, 1).isoformat()
+        url = f"{PSF_EXPORT}?fromDate={frm}&toDate={as_of}" + "".join(f"&state={a}" for a in abbrs)
+        data = urllib.request.urlopen(url, timeout=600).read()
+    text = data.decode("utf-8-sig", errors="replace")
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if not rows or "oscarNumber" not in rows[0]:
+        raise ValueError("that does not look like a CMS inpatient PSF export (no oscarNumber column)")
+    profiles, stats = import_psf(rows, as_of, state_codes, p.get("ippsOnly", True), p.get("names", True))
+    existing = {} if p.get("replace") else json.loads(read_profiles() or b"{}")
+    existing.update(profiles)
+    with open(PROFILES, "w") as f:
+        json.dump(existing, f, indent=1)
+    stats["totalProfiles"] = len(existing)
+    stats["asOf"] = as_of
+    return stats
+
+# ----------------------------------------------------------------------------
 # HTTP handler
 # ----------------------------------------------------------------------------
 class Handler(SimpleHTTPRequestHandler):
@@ -373,7 +537,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*a, directory=os.path.join(HERE, "static"), **k)
     def log_message(self, fmt, *args):
         line = fmt % args if args else fmt
-        if "/api/" in line or "/profiles" in line or "/batch" in line or "code " in line:
+        if "/api/" in line or "/profiles" in line or "/batch" in line or "/psf" in line or "code " in line:
             sys.stderr.write(f"[ui] {line}\n")
     def _proxy(self, method, path, body=None):
         req = urllib.request.Request(self.base + path, data=body, method=method,
@@ -450,6 +614,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send(200, {"headers": headers, "rows": len(rows)})
             except Exception as e:
                 return self._send(400, {"error": f"could not read file: {e}"})
+        if self.path == "/psf/import":
+            try:
+                stats = run_psf_import(json.loads(self._body()))
+                return self._send(200, stats)
+            except Exception as e:
+                return self._send(400, {"error": str(e)})
         if self.path == "/batch":
             try:
                 p = json.loads(self._body())
