@@ -93,8 +93,13 @@ def _col_index(ref):
 
 def read_xlsx_rows(data):
     """Yield rows (lists of cell values) from the first worksheet of an xlsx file."""
-    z = zipfile.ZipFile(io.BytesIO(data))
-    names = z.namelist()
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        names = z.namelist()
+        if not any(n.startswith("xl/worksheets/sheet") for n in names):
+            raise ValueError("no worksheet inside")
+    except (zipfile.BadZipFile, ValueError) as e:
+        raise ValueError(f"not a valid .xlsx workbook ({e})")
     shared = []
     if "xl/sharedStrings.xml" in names:
         for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(NS + "si"):
@@ -189,15 +194,18 @@ def write_xlsx(path, headers, rows_iter):
         z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
         z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="results" sheetId="1" r:id="rId1"/></sheets></workbook>')
         z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
-        buf = io.StringIO()
-        buf.write('<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
-        buf.write("<row r=\"1\">" + "".join(cell(f"{letters[i]}1", h) for i, h in enumerate(headers)) + "</row>")
-        n = 1
-        for row in rows_iter:
-            n += 1
-            buf.write(f'<row r="{n}">' + "".join(cell(f"{letters[i]}{n}", row[i]) for i in range(len(headers))) + "</row>")
-        buf.write("</sheetData></worksheet>")
-        z.writestr("xl/worksheets/sheet1.xml", buf.getvalue())
+        with z.open("xl/worksheets/sheet1.xml", "w", force_zip64=True) as sheet:
+            w = lambda t: sheet.write(t.encode("utf-8"))
+            w('<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
+            w("<row r=\"1\">" + "".join(cell(f"{letters[i]}1", h) for i, h in enumerate(headers)) + "</row>")
+            n = 1
+            chunk = []
+            for row in rows_iter:
+                n += 1
+                chunk.append(f'<row r="{n}">' + "".join(cell(f"{letters[i]}{n}", row[i]) for i in range(len(headers))) + "</row>")
+                if len(chunk) >= 2000:
+                    w("".join(chunk)); chunk = []
+            w("".join(chunk) + "</sheetData></worksheet>")
 
 # ----------------------------------------------------------------------------
 # Row -> pricer request (mirrors the browser's rowToRequest; field rules come
@@ -210,6 +218,8 @@ def fmt_date(v):
     if isinstance(v, (int, float)) and 20000 < v < 80000:
         return excel_date(v)
     s = str(v).strip()
+    if re.fullmatch(r"\d{5}(\.0+)?", s) and 20000 < float(s) < 80000:      # Excel serial that arrived as text (CSV)
+        return excel_date(float(s))
     m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
     if m:
         return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
@@ -234,6 +244,8 @@ def coerce(ctx, col, raw):
     s = str(raw).strip()
     if isinstance(raw, (int, float)) and float(raw).is_integer():
         s = str(int(raw))
+    elif re.fullmatch(r"\d+\.0+", s):                                       # "470.0" typed or exported as text
+        s = s.split(".")[0]
     pad = ctx["pad"].get(col)
     if pad and s.isdigit():
         s = s.zfill(pad)

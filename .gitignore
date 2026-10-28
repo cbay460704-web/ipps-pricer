@@ -15,3 +15,6 @@ ipps-pricer-ui/hospital-names.json
 # email-sized bundle
 ipps-pricer-poc.zip
 results/
+
+# stress-test scratch
+stress/out/

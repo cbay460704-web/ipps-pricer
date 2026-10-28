@@ -536,6 +536,7 @@ let pendingUpload=null, serverJob=null;   // files are priced server-side; paste
 
 function fmtDate(v){ if(v instanceof Date) return isNaN(v)?"":v.toISOString().slice(0,10);
   if(typeof v==="number" && v>20000 && v<80000){ return new Date(Math.round((v-25569)*86400000)).toISOString().slice(0,10); }
+  if(/^\d{5}(\.0+)?$/.test(String(v).trim()) && +v>20000 && +v<80000){ return new Date(Math.round((+v-25569)*86400000)).toISOString().slice(0,10); }
   const m=String(v).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if(m) return `${m[3]}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`;
   return String(v).trim(); }
 function cellValue(col, v){
@@ -544,7 +545,8 @@ function cellValue(col, v){
   if(f.t==="number") return Number(String(v).replace(/[$,]/g,""));
   if(f.t==="date") return fmtDate(v);
   if(f.t==="list") return String(v).split(/[;|,\s]+/).filter(Boolean);
-  let s=String(v).trim(); if(PAD[col] && /^\d+$/.test(s)) s=s.padStart(PAD[col],"0");
+  let s=String(v).trim(); if(/^\d+\.0+$/.test(s)) s=s.split(".")[0];
+  if(PAD[col] && /^\d+$/.test(s)) s=s.padStart(PAD[col],"0");
   if(col.startsWith("provider.cbsa") && /^\d+$/.test(s)) s=s.padStart(Number(s)<100?2:5,"0");
   return s;
 }
